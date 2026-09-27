@@ -22,10 +22,13 @@ const CHECKPOINTS = [
 interface Result {
   seed: number;
   levels: (number | null)[];
+  xpLevels: (number | null)[];
+  xp: (number | null)[];
   end: number;
   level: number;
   kills: number;
   died: boolean;
+  won: boolean;
   surgeBreaks: number[];
   links: string[];
   ms: number;
@@ -35,23 +38,34 @@ const results: Result[] = [];
 for (let r = 0; r < runs; r++) {
   const seed = seed0 + r;
   const w = new World({ seed });
+  if (args.includes('--god')) w.dev({ cmd: 'god', on: true });
   const levels: (number | null)[] = CHECKPOINTS.map(() => null);
+  const xpLevels: (number | null)[] = CHECKPOINTS.map(() => null);
+  const xp: (number | null)[] = CHECKPOINTS.map(() => null);
   const surgeBreaks: number[] = [];
   const t0 = performance.now();
   runBot(w, seconds, (wd) => {
     CHECKPOINTS.forEach((c, i) => {
-      if (levels[i] === null && wd.time >= c.t) levels[i] = wd.level;
+      if (levels[i] === null && wd.time >= c.t) {
+        levels[i] = wd.level;
+        xpLevels[i] = wd.level - wd.cacheLevels;
+        xp[i] = wd.xpEarned;
+      }
     });
     for (const ev of wd.events) if (ev.type === 'overflow') surgeBreaks.push(+ev.breakTime.toFixed(1));
   });
+  const won = w.won;
   const links = w.build.hardpoints.filter((c) => c && c.parts.length > 1).map((c) => c!.parts.map((p) => p.weapon.id).join('>'));
   results.push({
     seed,
     levels,
+    xpLevels,
+    xp,
     end: +w.time.toFixed(1),
     level: w.level,
     kills: w.kills,
     died: w.dead,
+    won,
     surgeBreaks,
     links,
     ms: Math.round(performance.now() - t0),
@@ -59,16 +73,29 @@ for (let r = 0; r < runs; r++) {
 }
 
 const fmt = (v: number | null) => (v === null ? '  -' : String(v).padStart(3));
-console.log('seed | ' + CHECKPOINTS.map((c) => `L@${c.t}s(${c.level})`).join(' ') + ' | end(s) lvl kills died | surge break s | links | ms');
+// Checkpoints compare the XP level (levels from XP, without Overflow Cache levels): see DECISIONS.md
+console.log('seed | XP level (shown level, XP) at ' + CHECKPOINTS.map((c) => `${c.t}s [${c.level}]`).join(', ') + ' | end s  lvl  kills result | surge breaks (s) | links');
 for (const r of results) {
+  const cp = CHECKPOINTS.map((_, i) => `${fmt(r.xpLevels[i])} (${fmt(r.levels[i])}, ${r.xp[i] ?? '-'})`).join('  ');
   console.log(
-    `${String(r.seed).padStart(4)} | ${r.levels.map(fmt).join('        ')}        | ${String(r.end).padStart(6)} ${fmt(r.level)} ${String(r.kills).padStart(5)} ${r.died ? 'yes ' : 'no  '} | ${r.surgeBreaks.join(',')} | ${r.links.join(' ')} | ${r.ms}`,
+    `${String(r.seed).padStart(4)} | ${cp} | ${String(r.end).padStart(6)} ${fmt(r.level)} ${String(r.kills).padStart(6)} ${r.won ? 'WON ' : r.died ? 'died' : 'time'} | ${r.surgeBreaks.join(',')} | ${r.links.join(' ')}`,
   );
 }
+let allOk = true;
 CHECKPOINTS.forEach((c, i) => {
-  const vals = results.map((r) => r.levels[i]).filter((v): v is number => v !== null);
+  const vals = results.map((r) => r.xpLevels[i]).filter((v): v is number => v !== null);
   if (!vals.length) return;
   const mean = vals.reduce((a, b) => a + b, 0) / vals.length;
   const within = vals.filter((v) => Math.abs(v - c.level) <= 3).length;
-  console.log(`checkpoint ${c.t}s: mean level ${mean.toFixed(1)} (target ${c.level} +-3), ${within}/${vals.length} within`);
+  if (within < vals.length) allOk = false;
+  console.log(`checkpoint ${c.t}s: mean XP level ${mean.toFixed(1)} (target ${c.level} +-3), ${within}/${vals.length} runs within`);
 });
+const breaks = results.flatMap((r) => r.surgeBreaks);
+if (breaks.length) {
+  const inBand = breaks.filter((b) => b >= 8 && b <= 20).length;
+  const slow = breaks.filter((b) => b > 25).length;
+  console.log(`surge breaks: ${inBand}/${breaks.length} in 8-20 s, ${slow} over 25 s`);
+}
+const done = results.filter((r) => r.won || r.died).length;
+console.log(`runs: ${results.filter((r) => r.won).length} won, ${results.filter((r) => r.died).length} died, ${results.length - done} still running at the time limit`);
+if (args.includes('--check')) process.exit(allOk ? 0 : 1);

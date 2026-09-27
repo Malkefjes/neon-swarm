@@ -1,4 +1,5 @@
 import { describe, expect, it } from 'vitest';
+import { TUNING } from '../src/tuning';
 import {
   damageMult,
   expectedKillsPerMinute,
@@ -13,18 +14,28 @@ import {
 } from '../src/sim/formulas';
 
 describe('XP curve', () => {
-  it('XP_next(L) = 10 + 12L', () => {
-    expect(xpNext(1)).toBe(22);
-    expect(xpNext(2)).toBe(34);
-    expect(xpNext(11)).toBe(142);
-    expect(xpNext(40)).toBe(490);
+  const { base, perLevel } = TUNING.xp;
+  it('XP_next(L) = base + perLevel x L (design form 10 + 12L; tuned values in src/tuning.ts)', () => {
+    for (const L of [1, 2, 11, 40]) expect(xpNext(L)).toBe(base + perLevel * L);
+    expect(base).toBe(10);
+    expect(perLevel).toBe(16);
   });
-  it('cumulative XP matches the design checkpoints (~10,000 XP for L41)', () => {
+  it('cumulative XP is the sum of the steps', () => {
     expect(xpTotal(1)).toBe(0);
-    expect(xpTotal(2)).toBe(22);
-    expect(xpTotal(12)).toBe(902);
-    expect(xpTotal(23)).toBe(3256);
-    expect(xpTotal(41)).toBe(10240);
+    expect(xpTotal(2)).toBe(xpNext(1));
+    let sum = 0;
+    for (let L = 1; L < 41; L++) sum += base + perLevel * L;
+    expect(xpTotal(41)).toBe(sum);
+  });
+  it('with the design values (10 + 12L) the curve gives the design table: ~10,000 XP for L41', () => {
+    const design = (L: number) => {
+      let s = 0;
+      for (let l = 1; l < L; l++) s += 10 + 12 * l;
+      return s;
+    };
+    expect(design(12)).toBe(902);
+    expect(design(23)).toBe(3256);
+    expect(design(41)).toBe(10240);
   });
 });
 

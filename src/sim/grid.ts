@@ -4,8 +4,8 @@ export class Grid {
   readonly cell: number;
   readonly cols: number;
   readonly origin: number;
-  private head: Int32Array;
-  private next: Int32Array;
+  head: Int32Array;
+  next: Int32Array;
 
   constructor(halfSize: number, cell: number, capacity: number) {
     this.cell = cell;
@@ -15,7 +15,7 @@ export class Grid {
     this.next = new Int32Array(capacity).fill(-1);
   }
 
-  private col(v: number): number {
+  col(v: number): number {
     const c = Math.floor((v - this.origin) / this.cell);
     return c < 0 ? 0 : c >= this.cols ? this.cols - 1 : c;
   }

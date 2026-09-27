@@ -11,18 +11,27 @@ jobs:
   check:
     if: ${{ github.event_name == 'workflow_dispatch' || github.event.workflow_run.conclusion == 'success' }}
     runs-on: ubuntu-latest
-    timeout-minutes: 20
+    timeout-minutes: 45
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-node@v4
         with:
           node-version: 22
+      - run: npm ci
       - run: npm install --no-save playwright@1.56.1
       - run: npx playwright install --with-deps chromium
+      - name: Simulated runs vs the design's level checkpoints
+        run: npm run sim -- --runs 20 --seconds 910 --god --check
       - name: Milestone 1 checks on the live site
+        if: always()
         run: node tools/m1-check.mjs "https://${{ github.repository_owner }}.github.io/${{ github.event.repository.name }}/" m1-check
+      - name: Milestone 2 checks on the live site
+        if: always()
+        run: node tools/m2-check.mjs "https://${{ github.repository_owner }}.github.io/${{ github.event.repository.name }}/" m2-check
       - uses: actions/upload-artifact@v4
         if: always()
         with:
-          name: m1-check
-          path: m1-check
+          name: live-checks
+          path: |
+            m1-check
+            m2-check

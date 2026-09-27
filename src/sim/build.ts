@@ -16,9 +16,10 @@ export interface Part {
   tokens: number;
   bankPower: number;
   bankSize: number;
-  // Counters for the dev readout.
+  // Counters for the dev readout and run summary.
   fired: number;
   skipped: number;
+  damage: number;
 }
 
 export interface Chain {
@@ -34,7 +35,7 @@ export interface Build {
 }
 
 export function makePart(weapon: Weapon): Part {
-  return { weapon, tokens: L.limiterBurst, bankPower: 0, bankSize: 0, fired: 0, skipped: 0 };
+  return { weapon, tokens: L.limiterBurst, bankPower: 0, bankSize: 0, fired: 0, skipped: 0, damage: 0 };
 }
 
 export function makeBuild(hardpoints: number, hull: number, speed: number): Build {
@@ -83,8 +84,8 @@ function isSoloAtLinkLevel(c: Chain | null, linkLevel: number): c is Chain {
   return !!c && c.parts.length === 1 && c.parts[0].weapon.level >= linkLevel;
 }
 
-/** Every Link the build can make right now. */
-export function linkOptions(b: Build, linkLevel: number = L.linkLevel): LinkOption[] {
+/** Every Link the build can make right now (parts must be at `linkLevel`). */
+export function linkOptions(b: Build, linkLevel: number): LinkOption[] {
   const out: LinkOption[] = [];
   const hp = b.hardpoints;
   for (let i = 0; i < hp.length; i++) {

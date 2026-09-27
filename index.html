@@ -18,6 +18,7 @@
       <div id="top">
         <div id="hardpoints"></div>
         <div id="centre"><span id="level">L1</span><span id="timer">0:00</span></div>
+        <div id="bossbar" hidden><span id="bossname"></span><div id="bossfill"></div></div>
         <div id="kills">0</div>
       </div>
       <div id="bottom">
@@ -25,6 +26,8 @@
         <div id="hullbar"><div id="hullfill"></div><span id="hulltext"></span></div>
       </div>
     </div>
+    <div id="indicators"></div>
+    <div id="toast"></div>
     <div id="cards" class="overlay" hidden></div>
     <div id="pause" class="overlay" hidden>
       <div class="panel">
@@ -32,15 +35,17 @@
         <p><kbd>Esc</kbd> resume &nbsp; <kbd>Backspace</kbd> restart run</p>
       </div>
     </div>
-    <div id="over" class="overlay" hidden><div class="panel" id="over-panel"></div></div>
+    <div id="over" class="overlay" hidden><div class="panel wide" id="over-panel"></div></div>
     <div id="title" class="overlay">
       <div class="panel">
         <h1>NEON SWARM</h1>
         <p class="sub">Build the chain reaction.</p>
         <p><kbd>W</kbd><kbd>A</kbd><kbd>S</kbd><kbd>D</kbd> move &nbsp; <kbd>1</kbd><kbd>2</kbd><kbd>3</kbd> pick &nbsp; <kbd>R</kbd> reroll &nbsp; <kbd>Esc</kbd> pause</p>
-        <p class="go">Press any key to deploy VANGUARD</p>
+        <p class="go">Press any key</p>
       </div>
     </div>
+    <div id="hangar" class="overlay" hidden><div class="panel wide" id="hangar-panel"></div></div>
+    <div id="codex" class="overlay" hidden><div class="panel wide" id="codex-panel"></div></div>
     <div id="dev-readout" hidden></div>
     <div id="dev-panel" hidden></div>
     <script type="module" src="/src/main.ts"></script>

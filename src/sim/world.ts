@@ -1,6 +1,9 @@
-// The whole game simulation: deterministic, fixed-step, no DOM or rendering.
-// Same seed + same input log => same run (see tests/determinism.test.ts).
-import { TUNING, type EnemyKind, type StatId, type WeaponId } from '../tuning';
+// The game simulation: deterministic, fixed-step, no DOM or rendering.
+// Same seed + same options + same input log => same run (tests/determinism.test.ts).
+// Weapons, the director and the bosses live in their own modules and operate on
+// the World's public state.
+import { len2 } from './math';
+import { TUNING, type EnemyKind, type StatId, type UnitEnemy, type WeaponId } from '../tuning';
 import {
   addWeapon,
   allWeapons,
@@ -15,92 +18,57 @@ import {
   type LinkOption,
 } from './build';
 import { makeDraft, type Card, type DraftContext } from './draft';
-import {
-  damageMult,
-  hpMult,
-  onScreenTarget,
-  surgeSize,
-  threatPerSecond,
-  triggerChance,
-  triggerMult,
-  xpNext,
-} from './formulas';
+import { damageMult, hpMult, triggerChance, triggerMult, xpNext } from './formulas';
 import { Grid } from './grid';
 import { Rng } from './rng';
-import { FORESHORTEN, HALF_H, HALF_W, RIGHT, UP, inputToGround, toGround } from './view';
+import { FORESHORTEN, RIGHT, UP, inputToGround } from './view';
+import type {
+  Arc,
+  Bolt,
+  Core,
+  Enemy,
+  Hazard,
+  Missile,
+  OrbitBlade,
+  Pickup,
+  PickupKind,
+  Ring,
+  Shell,
+  Src,
+  Zone,
+} from './types';
+import { endOldestContinuous, fireHeads, fireTrigger, updateEffects } from './weapons';
+import { devBoss, devElite, devSurge, direct, onSurgeUnitKilled, spawnPoint } from './director';
+import { onBossKilled, updateBosses } from './bosses';
+
+export type { Enemy } from './types';
+export type { Card };
 
 const T = TUNING;
-const DT = 1 / T.sim.tickRate;
+export const DT = 1 / T.sim.tickRate;
 const MAX_PART_SLOTS = 4 * T.links.maxParts;
-
-export interface Enemy {
-  id: number;
-  kind: EnemyKind;
-  x: number;
-  z: number;
-  px: number; // position at the start of the tick, for render interpolation
-  pz: number;
-  r: number;
-  hp: number;
-  maxHp: number;
-  speed: number;
-  damage: number;
-  xp: number;
-  alive: boolean;
-  lastHit: number; // tick of the last hit, for the white flash
-  surge: number; // id of the Surge this unit belongs to, 0 if none
-  gate: Float64Array; // per Link part: game time until this enemy may source another trigger
-}
-
-export interface Bolt {
-  x: number;
-  z: number;
-  px: number;
-  pz: number;
-  dx: number;
-  dz: number;
-  speed: number;
-  travelled: number;
-  range: number;
-  radius: number;
-  damage: number;
-  pierce: number;
-  hits: number[];
-  chain: Chain | null;
-  part: number;
-  triggered: boolean;
-  alive: boolean;
-}
-
-export interface Arc {
-  x1: number;
-  z1: number;
-  x2: number;
-  z2: number;
-  life: number;
-  maxLife: number;
-  weapon: WeaponId;
-  triggered: boolean;
-}
-
-export interface Core {
-  x: number;
-  z: number;
-  px: number;
-  pz: number;
-  value: number;
-  state: 0 | 1 | 2; // idle, magnetised, Overflow pull
-}
+/** Enemies up to this radius go in the grid; bigger ones (elites, bosses) are checked directly. */
+export const SMALL_R = 0.9;
 
 export type WorldEvent =
   | { type: 'levelup' }
   | { type: 'hurt' }
   | { type: 'link'; chain: WeaponId[] }
   | { type: 'codex'; pair: string }
-  | { type: 'breath' }
-  | { type: 'surge'; size: number }
-  | { type: 'overflow'; breakTime: number }
-  | { type: 'death' };
+  | { type: 'breath'; boss: boolean }
+  | { type: 'surge'; n: number; size: number }
+  | { type: 'overflow'; n: number; breakTime: number }
+  | { type: 'elite' }
+  | { type: 'eliteDown' }
+  | { type: 'boss'; kind: 'brood' | 'overmind' }
+  | { type: 'bossDown'; kind: 'brood' | 'overmind' }
+  | { type: 'pickup'; kind: PickupKind }
+  | { type: 'feat'; feat: Feat }
+  | { type: 'death' }
+  | { type: 'win' };
+
+/** Unlock feats a run can achieve (see docs/game-design.md, Meta progression). */
+export type Feat = 'broodBeaten' | 'firstLink' | 'fastSurge' | 'threeLinks' | 'apex' | 'win';
 
 export type LogEvent =
   | { tick: number; type: 'choose'; index: number; order: number }
@@ -113,8 +81,10 @@ export type DevCommand =
   | { cmd: 'link'; chain: WeaponId[]; chainLevel: number }
   | { cmd: 'chainLevel'; slot: number; level: number }
   | { cmd: 'stat'; stat: StatId; value: number }
-  | { cmd: 'surge' }
-  | { cmd: 'spawn'; count: number }
+  | { cmd: 'surge'; n?: number }
+  | { cmd: 'boss'; kind: 'brood' | 'overmind' }
+  | { cmd: 'elite' }
+  | { cmd: 'spawn'; count: number; kind?: EnemyKind }
   | { cmd: 'god'; on: boolean }
   | { cmd: 'stress'; on: boolean }
   | { cmd: 'bench'; count: number; minutes: number }
@@ -122,15 +92,18 @@ export type DevCommand =
   | { cmd: 'xp'; amount: number }
   | { cmd: 'director'; on: boolean };
 
-export type SurgePhase = 'build' | 'breath' | 'surge';
+export type SurgePhase = 'build' | 'breath' | 'surge' | 'boss';
 
 export interface WorldOptions {
   seed: number;
+  /** Weapons that can appear in drafts (unlocked and implemented). Defaults to the starting 6. */
+  weapons?: readonly WeaponId[];
 }
 
 export class World {
   readonly seed: number;
   readonly rng: Rng;
+  readonly weaponPool: readonly WeaponId[];
 
   tick = 0;
   time = 0; // game seconds (slows during slow-mo)
@@ -145,8 +118,9 @@ export class World {
   hull: number;
   invuln = 0;
   dead = false;
+  won = false;
   runOver = false;
-  private deathTimer = 0;
+  endTimer = 0;
 
   // Camera (simulated so spawning is deterministic)
   camX = 0;
@@ -155,8 +129,8 @@ export class World {
   pcamZ = 0;
 
   build: Build;
-  weaponCap = 5;
-  linkLevel: number = T.links.linkLevel;
+  weaponCap: number;
+  linkLevel: number;
 
   // Progress
   level = 1;
@@ -164,50 +138,79 @@ export class World {
   kills = 0;
   pendingLevels = 0;
   draft: Card[] | null = null;
-  private draftHasLink = false;
-  private lastDraftHadLink = false;
+  draftHasLink = false;
+  lastDraftHadLink = false;
+  forceLinkDraft = false;
   rerolls: number = T.draft.rerollsPerRun;
-  codex = new Set<string>();
+  linksMade = 0;
+  cacheLevels = 0; // levels that came from Overflow Caches rather than XP
+  damageTaken: Record<string, number> = {};
+  xpEarned = 0;
+  codex = new Set<string>(); // ordered pairs that triggered this run
+  pairKills = new Map<string, number>(); // kills by effects each ordered pair triggered
+  chainDamage = new Map<string, number>(); // damage per chain (weapon ids joined by '>')
+  chainKills = new Map<string, number>();
+  apexes = new Set<string>();
+  feats = new Set<Feat>();
 
   // Entities
   enemies: Enemy[] = [];
+  big: Enemy[] = []; // enemies too big for the grid, rebuilt every tick
+  bosses: Enemy[] = [];
   bolts: Bolt[] = [];
+  missiles: Missile[] = [];
+  shells: Shell[] = [];
+  zones: Zone[] = [];
+  orbitBlades: OrbitBlade[] = [];
+  soloBlades: { x: number; z: number; weapon: WeaponId }[] = [];
+  soloBladeHits = new Map<number, number>();
+  bladeAngle = 0;
   arcs: Arc[] = [];
+  rings: Ring[] = [];
   cores: Core[] = [];
-  private triggeredArcsExpire: number[] = []; // game time at which each live triggered Tesla effect ends
-  private enemyPool: Enemy[] = [];
-  private nextEnemyId = 1;
-  private grid: Grid;
-  private cands: number[] = [];
-  private collect = (i: number) => {
-    this.cands.push(i);
-  };
-  private pushX = new Float32Array(2048);
-  private pushZ = new Float32Array(2048);
+  pickups: Pickup[] = [];
+  hazards: Hazard[] = [];
+  triggeredInstant: number[] = []; // expiry times of live triggered instant effects (Tesla chains, Arc rings)
+  enemyPool: Enemy[] = [];
+  nextEnemyId = 1;
+  grid: Grid;
+  pushX = new Float32Array(2048);
+  pushZ = new Float32Array(2048);
+
+  // Arena: a square, which becomes a closing circle in the Overmind's last phase
+  arenaRadius = Infinity;
 
   // Director
-  private budget = 0;
-  private killTimes: number[] = [];
-  private killHead = 0;
+  budget = 0;
+  killTimes: number[] = [];
+  killHead = 0;
   surgePhase: SurgePhase = 'build';
-  private surgeIndex = 0; // next scheduled Surge
-  surgeCount = 0; // Surges spawned so far
-  private surgeId = 0;
+  surgeIndex = 0; // next scheduled entry
+  surgeCount = 0; // Surges spawned so far (schedule slots, the Brood Mother included)
+  surgeId = 0;
   surgeSize = 0;
   surgeKilled = 0;
   surgeStart = 0;
+  surgeSizeMult = 1;
   lastBreakTime = 0;
+  breakTimes: number[] = [];
+  nextElite: number = T.elite.from;
+  lastRepair = -Infinity;
+  lastMagnet = -Infinity;
+  overmindSpawned = false;
+  overmindBreath = false;
 
   // Time control, in real ticks
-  private hitStopTicks = 0;
+  hitStopTicks = 0;
   overflowTicks = 0;
+  bossSlowTicks = 0;
 
   // Dev
   god = false;
   stress = false;
   benchCount = 0;
   directorOn = true;
-  private benchHpMult = 1;
+  benchHpMult = 1;
 
   // Logs
   inputs: number[] = [];
@@ -217,8 +220,11 @@ export class World {
   constructor(opts: WorldOptions) {
     this.seed = opts.seed >>> 0;
     this.rng = new Rng(this.seed);
+    this.weaponPool = opts.weapons ?? T.startingWeapons;
     const f = T.frames.vanguard;
     this.build = makeBuild(f.hardpoints, f.hull, f.speed);
+    this.weaponCap = f.weaponCap;
+    this.linkLevel = f.linkLevel;
     this.hull = f.hull;
     addWeapon(this.build, f.startWeapon);
     this.grid = new Grid(T.arena.halfSize, T.crowd.cellSize, 2048);
@@ -236,25 +242,86 @@ export class World {
 
   get timeScale(): number {
     if (this.hitStopTicks > 0) return 0;
-    if (this.dead) return T.death.slowScale;
+    if (this.dead || this.won) return T.death.slowScale;
+    if (this.bossSlowTicks > 0) return T.sim.bossDeathScale;
     if (this.overflowTicks > 0) return T.overflow.slowScale;
     return 1;
   }
 
-  /** Seconds until the next scheduled Surge arrives, or null. */
-  get nextSurgeIn(): number | null {
+  /** Seconds until the next scheduled Surge or boss, and what it is. */
+  get nextThreat(): { in: number; boss: string | null } | null {
     const s = T.surge.schedule[this.surgeIndex];
-    return s ? Math.max(0, s.time - this.time) : null;
+    if (s) return { in: Math.max(0, s.time - this.time), boss: s.formation === 'brood' ? 'BROOD MOTHER' : null };
+    if (!this.overmindSpawned) return { in: Math.max(0, T.surge.overmindAt - this.time), boss: 'OVERMIND' };
+    return null;
   }
 
   get triggeredEffects(): number {
-    let n = this.triggeredArcsExpire.length;
-    for (const b of this.bolts) if (b.triggered) n++;
+    let n = this.triggeredInstant.length;
+    for (const b of this.bolts) if (b.src.triggered) n++;
+    for (const m of this.missiles) if (m.src.triggered) n++;
+    for (const s of this.shells) if (s.src.triggered) n++;
+    for (const z of this.zones) if (z.src.triggered) n++;
+    n += this.orbitBlades.length;
     return n;
   }
 
-  private draftContext(): DraftContext {
-    return { build: this.build, unlocked: T.weaponPool, weaponCap: this.weaponCap, linkLevel: this.linkLevel };
+  draftContext(): DraftContext {
+    return { build: this.build, unlocked: this.weaponPool, weaponCap: this.weaponCap, linkLevel: this.linkLevel };
+  }
+
+  /** Calls fn for every live enemy that might be within r of (x, z); callers test exact distance. */
+  near(x: number, z: number, r: number, fn: (e: Enemy) => void): void {
+    const es = this.enemies;
+    this.grid.query(x, z, r + SMALL_R, (i) => {
+      const e = es[i];
+      if (e.alive) fn(e);
+    });
+    for (const e of this.big) if (e.alive) fn(e);
+  }
+
+  /** Up to k nearest live enemies whose edge is within range of (x, z), nearest first. */
+  nearest(x: number, z: number, range: number, k: number, exclude?: Set<number> | number): Enemy[] {
+    const found: { e: Enemy; d: number }[] = [];
+    this.near(x, z, range, (e) => {
+      if (exclude !== undefined && (typeof exclude === 'number' ? e.id === exclude : exclude.has(e.id))) return;
+      const d = Math.max(0, len2(e.x - x, e.z - z) - (e.r > SMALL_R ? e.r : 0));
+      if (d > range) return;
+      found.push({ e, d });
+    });
+    found.sort((a, b) => a.d - b.d || a.e.id - b.e.id);
+    const out: Enemy[] = [];
+    for (let i = 0; i < found.length && i < k; i++) out.push(found[i].e);
+    return out;
+  }
+
+  nearestOne(x: number, z: number, range: number, exclude?: Set<number> | number): Enemy | null {
+    let best: Enemy | null = null;
+    let bestId = 0;
+    let bd = range;
+    this.near(x, z, range, (e) => {
+      if (exclude !== undefined && (typeof exclude === 'number' ? e.id === exclude : exclude.has(e.id))) return;
+      const d = Math.max(0, len2(e.x - x, e.z - z) - (e.r > SMALL_R ? e.r : 0));
+      if (d < bd || (d === bd && best !== null && e.id < bestId)) {
+        bd = d;
+        best = e;
+        bestId = e.id;
+      }
+    });
+    return best;
+  }
+
+  /** All live enemies overlapping a disc, in id order. */
+  inDisc(x: number, z: number, r: number): Enemy[] {
+    const out: Enemy[] = [];
+    this.near(x, z, r, (e) => {
+      const rr = r + e.r;
+      const dx = e.x - x;
+      const dz = e.z - z;
+      if (dx * dx + dz * dz <= rr * rr) out.push(e);
+    });
+    out.sort((a, b) => a.id - b.id);
+    return out;
   }
 
   // ---------------------------------------------------------------- input
@@ -264,10 +331,12 @@ export class World {
     if (this.draft || this.runOver) return;
     this.inputs.push((mx + 1) * 3 + (my + 1));
 
-    const scale = this.timeScale;
-    const dt = DT * scale;
+    const dt = DT * this.timeScale;
     if (this.hitStopTicks > 0) this.hitStopTicks--;
-    else if (this.overflowTicks > 0) this.overflowTicks--;
+    else {
+      if (this.overflowTicks > 0) this.overflowTicks--;
+      if (this.bossSlowTicks > 0) this.bossSlowTicks--;
+    }
 
     this.px = this.x;
     this.pz = this.z;
@@ -281,27 +350,37 @@ export class World {
       b.px = b.x;
       b.pz = b.z;
     }
+    for (const m of this.missiles) {
+      m.px = m.x;
+      m.pz = m.z;
+    }
     for (const c of this.cores) {
       c.px = c.x;
       c.pz = c.z;
     }
+    for (const h of this.hazards) {
+      h.px = h.x;
+      h.pz = h.z;
+    }
+
     if (dt > 0) {
-      if (this.dead) {
-        this.deathTimer -= dt;
-        if (this.deathTimer <= 0) this.runOver = true;
+      if (this.dead || this.won) {
+        this.endTimer -= dt;
+        if (this.endTimer <= 0) this.runOver = true;
       } else {
         this.moveMech(mx, my, dt);
       }
       this.moveCamera(dt);
-      this.direct(dt);
+      direct(this, dt);
       this.moveEnemies(dt);
+      updateBosses(this, dt);
       this.contact();
-      this.fireWeapons(dt);
-      this.updateBolts(dt);
-      this.updateArcs(dt);
+      refillLimiters(this.build, dt);
+      if (!this.dead && !this.won) fireHeads(this, dt);
+      updateEffects(this, dt);
       this.compactEnemies();
       this.updateCores(dt);
-      this.checkSurgeBreak();
+      this.updatePickups(dt);
       this.time += dt;
     }
     this.tick++;
@@ -331,6 +410,23 @@ export class World {
     this.applyDev(cmd);
   }
 
+  // ---------------------------------------------------------------- arena
+
+  /** Clamp a point of radius r inside the arena (square, or the closing circle). */
+  clampToArena(p: { x: number; z: number }, r: number): void {
+    const lim = T.arena.halfSize - r;
+    p.x = clampAbs(p.x, lim);
+    p.z = clampAbs(p.z, lim);
+    if (this.arenaRadius < Infinity) {
+      const d = len2(p.x, p.z);
+      const max = Math.max(0.1, this.arenaRadius - r);
+      if (d > max) {
+        p.x *= max / d;
+        p.z *= max / d;
+      }
+    }
+  }
+
   // ---------------------------------------------------------------- mech
 
   private moveMech(mx: number, my: number, dt: number): void {
@@ -339,7 +435,7 @@ export class World {
     let tz = 0;
     if (mx || my) {
       const g = inputToGround(mx, my);
-      const len = Math.hypot(g.x, g.z);
+      const len = len2(g.x, g.z);
       tx = (g.x / len) * speed;
       tz = (g.z / len) * speed;
     }
@@ -347,7 +443,7 @@ export class World {
     const maxDv = (speed / T.mech.accelTime) * dt;
     const dvx = tx - this.vx;
     const dvz = tz - this.vz;
-    const dv = Math.hypot(dvx, dvz);
+    const dv = len2(dvx, dvz);
     if (dv <= maxDv) {
       this.vx = tx;
       this.vz = tz;
@@ -355,9 +451,9 @@ export class World {
       this.vx += (dvx / dv) * maxDv;
       this.vz += (dvz / dv) * maxDv;
     }
-    const lim = T.arena.halfSize - T.mech.radius;
-    this.x = clampAbs(this.x + this.vx * dt, lim);
-    this.z = clampAbs(this.z + this.vz * dt, lim);
+    this.x += this.vx * dt;
+    this.z += this.vz * dt;
+    this.clampToArena(this, T.mech.radius);
     if (this.invuln > 0) this.invuln -= dt;
   }
 
@@ -370,135 +466,60 @@ export class World {
     this.camZ += (tz - this.camZ) * k;
   }
 
-  // ---------------------------------------------------------------- director
-
-  private direct(dt: number): void {
-    // Kill window for Surge sizing
-    while (this.killHead < this.killTimes.length && this.killTimes[this.killHead] < this.time - 60) this.killHead++;
-    if (this.killHead > 4096) {
-      this.killTimes = this.killTimes.slice(this.killHead);
-      this.killHead = 0;
-    }
-
-    if (this.benchCount > 0) {
-      this.maintainBench();
-      return;
-    }
-
-    const next = T.surge.schedule[this.surgeIndex];
-    if (next && !this.dead && this.directorOn) {
-      if (this.surgePhase === 'build' && this.time >= next.time - T.surge.breath) {
-        this.surgePhase = 'breath';
-        this.events.push({ type: 'breath' });
+  /** Damage the mech (contact, projectiles, hazards). Returns true if it landed. */
+  hurt(amount: number, source = 'unknown'): boolean {
+    if (this.invuln > 0 || this.god || this.dead || this.won) return false;
+    this.hull -= amount;
+    this.damageTaken[source] = (this.damageTaken[source] ?? 0) + amount;
+    this.invuln = T.mech.invulnTime;
+    this.events.push({ type: 'hurt' });
+    // Every enemy touching the mech is pushed back 1 u.
+    const mr = T.mech.radius;
+    this.near(this.x, this.z, mr + 0.1, (e) => {
+      if (e.mass === 0) return;
+      let dx = e.x - this.x;
+      let dz = e.z - this.z;
+      let d = len2(dx, dz);
+      if (d > mr + e.r + 0.05) return;
+      if (d < 1e-5) {
+        dx = UP.x;
+        dz = UP.z;
+        d = 1;
       }
-      if (this.surgePhase === 'breath' && this.time >= next.time) {
-        this.surgeIndex++;
-        this.startSurge();
-      }
-    }
-
-    if (this.surgePhase === 'breath' || this.dead || !this.directorOn) return;
-    const tMin = this.tMin;
-    const income = threatPerSecond(tMin);
-    this.budget = Math.min(this.budget + income * dt, income * T.director.maxBankedSeconds);
-    const target = onScreenTarget(tMin);
-    while (this.enemies.length < target && this.enemies.length < T.sim.maxEnemies) {
-      const kind = this.pickKind();
-      const cost = T.enemies[kind].cost;
-      if (this.budget < cost) break;
-      this.budget -= cost;
-      const p = this.spawnPoint();
-      this.spawnEnemy(kind, p.x, p.z, 0);
-    }
+      e.x += (dx / d) * T.mech.knockback;
+      e.z += (dz / d) * T.mech.knockback;
+      this.clampToArena(e, e.r);
+    });
+    if (this.hull <= 0) this.die();
+    return true;
   }
 
-  private pickKind(): EnemyKind {
-    // Milestone 1 implements Mites only; later windows' units fall back to Mites.
-    return 'mite';
+  private die(): void {
+    this.hull = 0;
+    this.dead = true;
+    this.endTimer = T.death.slowTime;
+    this.vx = this.vz = 0;
+    this.events.push({ type: 'death' });
   }
 
-  private killsLast60(): number {
-    return this.killTimes.length - this.killHead;
+  winRun(): void {
+    if (this.dead || this.won) return;
+    this.won = true;
+    this.endTimer = T.death.slowTime;
+    this.addFeat('win');
+    this.events.push({ type: 'win' });
   }
 
-  private startSurge(): void {
-    this.surgeCount++;
-    const n = this.surgeCount;
-    const size = surgeSize(n, this.killsLast60(), this.tMin);
-    this.surgeId++;
-    this.surgePhase = 'surge';
-    this.surgeKilled = 0;
-    this.surgeStart = this.time;
-    // Formation: Ring of Mites, spawned at the camera edge around the mech.
-    let placed = 0;
-    let radius = T.surge.ringRadius;
-    const room = T.sim.maxEnemies - this.enemies.length;
-    const total = Math.min(size, room);
-    const lim = T.arena.halfSize - 1;
-    while (placed < total) {
-      const perRow = Math.max(8, Math.floor((2 * Math.PI * radius) / T.surge.ringSpacing));
-      const count = Math.min(perRow, total - placed);
-      const offset = this.rng.next() * Math.PI * 2;
-      for (let i = 0; i < count; i++) {
-        const a = offset + (i / count) * Math.PI * 2;
-        const x = clampAbs(this.x + Math.cos(a) * radius, lim);
-        const z = clampAbs(this.z + Math.sin(a) * radius, lim);
-        this.spawnEnemy('mite', x, z, this.surgeId);
-      }
-      placed += count;
-      radius += T.surge.ringSpacing;
-    }
-    this.surgeSize = placed;
-    this.events.push({ type: 'surge', size: placed });
+  addFeat(f: Feat): void {
+    if (this.feats.has(f)) return;
+    this.feats.add(f);
+    this.events.push({ type: 'feat', feat: f });
   }
 
-  private checkSurgeBreak(): void {
-    if (this.surgePhase !== 'surge') return;
-    if (this.surgeKilled < Math.ceil(this.surgeSize * T.surge.breakFraction)) return;
-    this.surgePhase = 'build';
-    this.lastBreakTime = this.time - this.surgeStart;
-    this.surgeId++; // survivors keep an id that no longer counts
-    // Overflow: pull every core, heal, slow time.
-    for (const c of this.cores) c.state = 2;
-    if (!this.dead) this.hull = Math.min(this.build.maxHull, this.hull + T.overflow.heal);
-    this.overflowTicks = Math.round(T.overflow.slowTime * T.sim.tickRate);
-    this.events.push({ type: 'overflow', breakTime: this.lastBreakTime });
-  }
+  // ---------------------------------------------------------------- enemies
 
-  /** A point 2-4 u beyond the edge of the nominal camera view, inside the arena. */
-  private spawnPoint(): { x: number; z: number } {
-    const lim = T.arena.halfSize - 1;
-    let best = { x: 0, z: 0 };
-    for (let attempt = 0; attempt < 4; attempt++) {
-      const m = this.rng.range(T.director.spawnMarginMin, T.director.spawnMarginMax);
-      const w = HALF_W + m;
-      const h = HALF_H + m;
-      const r = this.rng.next() * (4 * w + 4 * h);
-      let sx: number;
-      let sy: number;
-      if (r < 2 * w) {
-        sx = r - w;
-        sy = h;
-      } else if (r < 4 * w) {
-        sx = r - 3 * w;
-        sy = -h;
-      } else if (r < 4 * w + 2 * h) {
-        sx = w;
-        sy = r - 4 * w - h;
-      } else {
-        sx = -w;
-        sy = r - 4 * w - 3 * h;
-      }
-      const g = toGround(sx, sy);
-      best = { x: this.camX + g.dx, z: this.camZ + g.dz };
-      if (Math.abs(best.x) <= lim && Math.abs(best.z) <= lim) return best;
-    }
-    return { x: clampAbs(best.x, lim), z: clampAbs(best.z, lim) };
-  }
-
-  spawnEnemy(kind: EnemyKind, x: number, z: number, surge: number): Enemy | null {
+  spawnEnemy(kind: EnemyKind, x: number, z: number, surge: number, elite: 0 | 1 | 2 = 0): Enemy | null {
     if (this.enemies.length >= T.sim.maxEnemies) return null;
-    const def = T.enemies[kind];
     const e: Enemy = this.enemyPool.pop() ?? {
       id: 0,
       kind,
@@ -506,81 +527,156 @@ export class World {
       z: 0,
       px: 0,
       pz: 0,
+      fx: 0,
+      fz: 1,
       r: 0,
       hp: 0,
       maxHp: 0,
+      shield: 0,
       speed: 0,
       damage: 0,
       xp: 0,
       alive: true,
       lastHit: -99,
       surge: 0,
+      elite: 0,
+      blocks: false,
+      mass: 1,
+      zigT: 0,
+      zig: 1,
+      marchX: 0,
+      marchZ: 0,
+      marchLeft: 0,
       gate: new Float64Array(MAX_PART_SLOTS),
+      boss: null,
     };
     const tMin = this.tMin;
     e.id = this.nextEnemyId++;
     e.kind = kind;
     e.x = e.px = x;
     e.z = e.pz = z;
-    e.r = def.radius;
-    e.maxHp = e.hp = def.hp * hpMult(tMin) * this.benchHpMult;
-    e.speed = def.speed;
-    e.damage = def.damage * damageMult(tMin);
-    e.xp = def.xp;
+    e.fx = 0;
+    e.fz = 1;
     e.alive = true;
     e.lastHit = -99;
     e.surge = surge;
+    e.elite = elite;
+    e.shield = 0;
+    e.zigT = 0;
+    e.zig = 1;
+    e.marchLeft = 0;
+    e.boss = null;
     e.gate.fill(-1);
+    if (kind === 'brood' || kind === 'overmind') {
+      // Bosses don't scale with time.
+      const b = T.bosses[kind];
+      e.r = b.radius;
+      e.maxHp = e.hp = b.hp;
+      e.speed = kind === 'brood' ? T.bosses.brood.speed : 0;
+      e.damage = b.contactDamage;
+      e.xp = 0;
+      e.blocks = true;
+      e.mass = 0;
+      e.boss = {
+        chargeT: T.bosses.brood.chargeEvery,
+        chargesLeft: 0,
+        telegraph: 0,
+        dashLeft: 0,
+        dirX: 0,
+        dirZ: 1,
+        burstT: T.bosses.brood.burstEvery,
+        spitT: T.bosses.brood.spitEvery / 2,
+        phase: 1,
+        beamAngle: 0,
+        summonT: T.bosses.overmind.summonEvery,
+        orbT: T.bosses.overmind.orbEvery,
+      };
+      this.bosses.push(e);
+    } else {
+      const def = T.enemies[kind as UnitEnemy];
+      const el = T.elite;
+      const hp = def.hp * hpMult(tMin) * this.benchHpMult * (elite ? el.hp : 1);
+      e.r = def.radius * (elite ? el.size : 1);
+      e.maxHp = e.hp = hp;
+      e.shield = elite === 2 ? hp * el.shield : 0;
+      e.speed = def.speed * (elite === 1 ? el.hastedSpeed : el.speed);
+      e.damage = def.damage * damageMult(tMin) * (elite ? el.damage : 1);
+      e.xp = elite ? el.xp : def.xp;
+      e.blocks = kind === 'carapace';
+      e.mass = 1 / (e.r * e.r);
+    }
     this.enemies.push(e);
     return e;
   }
 
-  private maintainBench(): void {
-    while (this.enemies.length < this.benchCount) {
-      const a = this.rng.next() * Math.PI * 2;
-      const r = this.rng.range(3, 14);
-      this.spawnEnemy('mite', clampAbs(this.x + Math.cos(a) * r, 99), clampAbs(this.z + Math.sin(a) * r, 99), 0);
-    }
-  }
-
-  // ---------------------------------------------------------------- enemies
-
   private rebuildGrid(): void {
     const g = this.grid;
     g.clear();
+    this.big.length = 0;
     const es = this.enemies;
-    for (let i = 0; i < es.length; i++) g.insert(i, es[i].x, es[i].z);
+    for (let i = 0; i < es.length; i++) {
+      const e = es[i];
+      if (e.r > SMALL_R) this.big.push(e);
+      else g.insert(i, e.x, e.z);
+    }
   }
 
   private moveEnemies(dt: number): void {
     const es = this.enemies;
     const n = es.length;
-    const lim = T.arena.halfSize - 0.5;
     const dW = T.director.despawnScreens * T.camera.viewWidth;
     const dH = T.director.despawnScreens * T.camera.viewHeight;
-    // Seek the mech
+    const sk = T.enemies.skitter;
+    const zigA = (sk.zigAngleDeg * Math.PI) / 180;
     for (let i = 0; i < n; i++) {
       const e = es[i];
-      const dx = this.x - e.x;
-      const dz = this.z - e.z;
-      const d = Math.hypot(dx, dz);
-      if (d > 1e-6) {
-        const s = (e.speed * dt) / d;
-        e.x += dx * s;
-        e.z += dz * s;
+      if (e.boss) continue; // bosses steer themselves
+      let dx: number;
+      let dz: number;
+      if (e.marchLeft > 0) {
+        dx = e.marchX;
+        dz = e.marchZ;
+        e.marchLeft -= e.speed * dt;
+      } else {
+        dx = this.x - e.x;
+        dz = this.z - e.z;
+        const d = len2(dx, dz);
+        if (d < 1e-6) continue;
+        dx /= d;
+        dz /= d;
+        if (e.kind === 'skitter') {
+          e.zigT -= dt;
+          if (e.zigT <= 0) {
+            e.zigT = sk.zigEvery;
+            e.zig = -e.zig;
+          }
+          const a = zigA * e.zig;
+          const c = Math.cos(a);
+          const s = Math.sin(a);
+          const rx = dx * c - dz * s;
+          dz = dx * s + dz * c;
+          dx = rx;
+        }
       }
-      // Too far away: respawn near the player (keeps its Surge membership)
-      const ox = e.x - this.camX;
-      const oz = e.z - this.camZ;
-      const sx = ox * RIGHT.x + oz * RIGHT.z;
-      const sy = (ox * UP.x + oz * UP.z) * FORESHORTEN;
-      if (Math.abs(sx) > dW || Math.abs(sy) > dH) {
-        const p = this.spawnPoint();
-        e.x = e.px = p.x;
-        e.z = e.pz = p.z;
+      e.fx = dx;
+      e.fz = dz;
+      e.x += dx * e.speed * dt;
+      e.z += dz * e.speed * dt;
+      // Too far away: respawn near the player (keeps its Surge membership). Elites are kept.
+      if (!e.elite) {
+        const ox = e.x - this.camX;
+        const oz = e.z - this.camZ;
+        const sx = ox * RIGHT.x + oz * RIGHT.z;
+        const sy = (ox * UP.x + oz * UP.z) * FORESHORTEN;
+        if (Math.abs(sx) > dW || Math.abs(sy) > dH) {
+          const p = spawnPoint(this);
+          e.x = e.px = p.x;
+          e.z = e.pz = p.z;
+          e.marchLeft = 0;
+        }
       }
     }
-    // Soft separation
+    // Soft separation, weighted by mass (bosses don't move)
     this.rebuildGrid();
     if (this.pushX.length < n) {
       this.pushX = new Float32Array(n * 2);
@@ -590,106 +686,197 @@ export class World {
     const pz = this.pushZ;
     px.fill(0, 0, n);
     pz.fill(0, 0, n);
-    const k = T.crowd.separation * 0.5;
+    const k = T.crowd.separation;
+    const pair = (i: number, j: number) => {
+      const a = es[i];
+      const b = es[j];
+      const dx = b.x - a.x;
+      const dz = b.z - a.z;
+      const rr = a.r + b.r;
+      const d2 = dx * dx + dz * dz;
+      if (d2 >= rr * rr) return;
+      const tm = a.mass + b.mass;
+      if (tm === 0) return;
+      let d = Math.sqrt(d2);
+      let nx: number;
+      let nz: number;
+      if (d < 1e-5) {
+        const ang = ((a.id * 7919 + b.id * 104729) % 628) / 100;
+        nx = Math.cos(ang);
+        nz = Math.sin(ang);
+        d = 0;
+      } else {
+        nx = dx / d;
+        nz = dz / d;
+      }
+      const push = ((rr - d) * k) / tm;
+      px[i] -= nx * push * a.mass;
+      pz[i] -= nz * push * a.mass;
+      px[j] += nx * push * b.mass;
+      pz[j] += nz * push * b.mass;
+    };
+    // Small enemies: walk the 3 x 3 grid cells around each one (cells are >= 2 x SMALL_R)
+    const g = this.grid;
+    const head = g.head;
+    const next = g.next;
+    const cols = g.cols;
+    const bigIdx: number[] = [];
     for (let i = 0; i < n; i++) {
       const a = es[i];
-      const reach = a.r + 0.9;
-      this.grid.query(a.x, a.z, reach, (j) => {
-        if (j <= i) return;
-        const b = es[j];
-        const dx = b.x - a.x;
-        const dz = b.z - a.z;
-        const rr = a.r + b.r;
-        const d2 = dx * dx + dz * dz;
-        if (d2 >= rr * rr) return;
-        let d = Math.sqrt(d2);
-        let nx: number;
-        let nz: number;
-        if (d < 1e-5) {
-          // Coincident: separate along a direction derived from the ids (deterministic)
-          const ang = ((a.id * 7919 + b.id * 104729) % 628) / 100;
-          nx = Math.cos(ang);
-          nz = Math.sin(ang);
-          d = 0;
-        } else {
-          nx = dx / d;
-          nz = dz / d;
+      if (a.r > SMALL_R) {
+        bigIdx.push(i);
+        continue;
+      }
+      const c0 = g.col(a.x);
+      const r0 = g.col(a.z);
+      const cLo = c0 > 0 ? c0 - 1 : 0;
+      const cHi = c0 < cols - 1 ? c0 + 1 : c0;
+      const rLo = r0 > 0 ? r0 - 1 : 0;
+      const rHi = r0 < cols - 1 ? r0 + 1 : r0;
+      const ax = a.x;
+      const az = a.z;
+      const ar = a.r;
+      for (let r = rLo; r <= rHi; r++) {
+        for (let c = cLo; c <= cHi; c++) {
+          for (let j = head[r * cols + c]; j !== -1; j = next[j]) {
+            if (j <= i) continue;
+            const b = es[j];
+            const dx = b.x - ax;
+            const dz = b.z - az;
+            const rr = ar + b.r;
+            if (dx * dx + dz * dz < rr * rr) pair(i, j);
+          }
         }
-        const push = (rr - d) * k;
-        px[i] -= nx * push;
-        pz[i] -= nz * push;
-        px[j] += nx * push;
-        pz[j] += nz * push;
-      });
+      }
+    }
+    for (let bi = 0; bi < bigIdx.length; bi++) {
+      const ib = bigIdx[bi];
+      const b = es[ib];
+      g.query(b.x, b.z, b.r + SMALL_R, (j) => pair(ib, j));
+      for (let bj = bi + 1; bj < bigIdx.length; bj++) pair(ib, bigIdx[bj]);
     }
     for (let i = 0; i < n; i++) {
       const e = es[i];
-      e.x = clampAbs(e.x + px[i], lim);
-      e.z = clampAbs(e.z + pz[i], lim);
+      e.x += px[i];
+      e.z += pz[i];
+      this.clampToArena(e, e.r);
     }
     this.rebuildGrid();
   }
 
-  /** Contact damage, knockback and shouldering through the horde. */
+  /** Contact damage; the mech shoulders through the horde but is stopped by blockers. */
   private contact(): void {
-    const es = this.enemies;
+    if (this.dead || this.won) return;
     const mr = T.mech.radius;
-    const touching: number[] = [];
-    if (!this.dead) {
-      this.grid.query(this.x, this.z, mr + 1, (i) => {
-        const e = es[i];
-        const rr = mr + e.r + 0.05;
-        const dx = e.x - this.x;
-        const dz = e.z - this.z;
-        if (dx * dx + dz * dz < rr * rr) touching.push(i);
-      });
-    }
-    let knock = false;
-    if (touching.length && this.invuln <= 0 && !this.god) {
-      let dmg = 0;
-      for (const i of touching) dmg = Math.max(dmg, es[i].damage);
-      this.hull -= dmg;
-      this.invuln = T.mech.invulnTime;
-      knock = true;
-      this.events.push({ type: 'hurt' });
-      if (this.hull <= 0) this.die();
-    }
-    for (const i of touching) {
-      const e = es[i];
+    let dmg = 0;
+    let source = '';
+    const touching: Enemy[] = [];
+    this.near(this.x, this.z, mr + 0.1, (e) => {
+      const rr = mr + e.r + 0.05;
+      const dx = e.x - this.x;
+      const dz = e.z - this.z;
+      if (dx * dx + dz * dz < rr * rr) {
+        touching.push(e);
+        if (e.damage > dmg) {
+          dmg = e.damage;
+          source = (e.elite ? 'elite ' : '') + e.kind;
+        }
+      }
+    });
+    if (!touching.length) return;
+    this.hurt(dmg, source);
+    for (const e of touching) {
       let dx = e.x - this.x;
       let dz = e.z - this.z;
-      let d = Math.hypot(dx, dz);
+      let d = len2(dx, dz);
       if (d < 1e-5) {
         dx = UP.x;
         dz = UP.z;
         d = 1;
       }
-      const rr = mr + e.r;
-      // Shoulder the Mite out of the way; knock it back 1 u after a hit.
-      const out = Math.max(0, rr - d) + (knock ? T.mech.knockback : 0);
-      e.x = clampAbs(e.x + (dx / d) * out, T.arena.halfSize - 0.5);
-      e.z = clampAbs(e.z + (dz / d) * out, T.arena.halfSize - 0.5);
+      const out = Math.max(0, T.mech.radius + e.r - d);
+      if (out <= 0) continue;
+      if (e.blocks) {
+        // Carapaces and bosses stop the mech
+        this.x -= (dx / d) * out;
+        this.z -= (dz / d) * out;
+        this.clampToArena(this, mr);
+      } else {
+        e.x += (dx / d) * out;
+        e.z += (dz / d) * out;
+        this.clampToArena(e, e.r);
+      }
     }
   }
 
-  private die(): void {
-    this.hull = 0;
-    this.dead = true;
-    this.deathTimer = T.death.slowTime;
-    this.vx = this.vz = 0;
-    this.events.push({ type: 'death' });
+  /**
+   * Damage an enemy. (sx, sz) is where the damage comes from, for Carapace fronts.
+   * Returns true if this killed it.
+   */
+  damage(e: Enemy, amount: number, src: Src | null, sx: number, sz: number): boolean {
+    if (!e.alive) return false;
+    if (e.kind === 'carapace') {
+      const c = T.enemies.carapace;
+      const dx = sx - e.x;
+      const dz = sz - e.z;
+      const d = len2(dx, dz);
+      if (d > 1e-5 && (dx * e.fx + dz * e.fz) / d >= Math.cos(((c.frontArcDeg / 2) * Math.PI) / 180)) amount *= c.frontMult;
+    }
+    e.lastHit = this.tick;
+    let dealt = amount;
+    if (e.shield > 0) {
+      const absorbed = Math.min(e.shield, amount);
+      e.shield -= absorbed;
+      amount -= absorbed;
+    }
+    e.hp -= amount;
+    if (e.hp < 0) dealt += e.hp;
+    if (src) {
+      const key = chainKey(src.chain);
+      this.chainDamage.set(key, (this.chainDamage.get(key) ?? 0) + dealt);
+      src.chain.parts[src.part].damage += dealt;
+    }
+    if (e.hp > 0) return false;
+    this.kill(e, src);
+    return true;
   }
 
-  private damage(e: Enemy, amount: number): void {
-    if (!e.alive) return;
-    e.hp -= amount;
-    e.lastHit = this.tick;
-    if (e.hp > 0) return;
+  private kill(e: Enemy, src: Src | null): void {
     e.alive = false;
     this.kills++;
     this.killTimes.push(this.time);
-    if (e.surge && e.surge === this.surgeId && this.surgePhase === 'surge') this.surgeKilled++;
+    if (src) {
+      const key = chainKey(src.chain);
+      this.chainKills.set(key, (this.chainKills.get(key) ?? 0) + 1);
+      if (src.pair) this.pairKills.set(src.pair, (this.pairKills.get(src.pair) ?? 0) + 1);
+    }
+    if (e.surge) onSurgeUnitKilled(this, e);
+    if (e.boss) {
+      onBossKilled(this, e);
+      return;
+    }
     this.dropCores(e.x, e.z, e.xp);
+    if (e.elite) {
+      this.pickups.push({ kind: 'cache', x: e.x, z: e.z, state: 0 });
+      this.hitStopTicks = Math.max(this.hitStopTicks, Math.round(T.sim.eliteHitStop * T.sim.tickRate));
+      this.events.push({ type: 'eliteDown' });
+    } else {
+      const P = T.pickups;
+      if (this.time - this.lastRepair >= P.repairCooldown && this.rng.chance(P.repairChance)) {
+        this.lastRepair = this.time;
+        this.pickups.push({ kind: 'repair', x: e.x, z: e.z, state: 0 });
+      } else if (this.time - this.lastMagnet >= P.magnetCooldown && this.rng.chance(P.magnetChance)) {
+        this.lastMagnet = this.time;
+        this.pickups.push({ kind: 'magnet', x: e.x, z: e.z, state: 0 });
+      }
+    }
+    if (e.kind === 'splitter') {
+      const n = T.enemies.splitter.splits;
+      for (let i = 0; i < n; i++) {
+        const a = (i / n) * Math.PI * 2 + (e.id % 7);
+        this.spawnEnemy('mite', e.x + Math.cos(a) * 0.5, e.z + Math.sin(a) * 0.5, 0, 0);
+      }
+    }
   }
 
   private compactEnemies(): void {
@@ -701,188 +888,16 @@ export class World {
       else this.enemyPool.push(e);
     }
     es.length = w;
-  }
-
-  // ---------------------------------------------------------------- weapons
-
-  private fireWeapons(dt: number): void {
-    refillLimiters(this.build, dt);
-    if (this.dead) return;
-    const rate = this.build.stats.rate;
-    for (const chain of this.build.hardpoints) {
-      if (!chain) continue;
-      const head = chain.parts[0].weapon; // only the head fires on its own
-      head.cooldown -= dt;
-      if (head.cooldown > 0) continue;
-      let fired = false;
-      if (head.id === 'pulse') fired = this.firePulse(chain);
-      else if (head.id === 'tesla') fired = this.fireTesla(chain);
-      if (fired) head.cooldown = this.cooldownOf(head.id, head.level) / rate;
-      else head.cooldown = 0;
-    }
-  }
-
-  private cooldownOf(id: WeaponId, level: number): number {
-    if (id === 'pulse') return T.weapons.pulse.levels[level]!.cooldown;
-    return T.weapons.tesla.cooldown;
-  }
-
-  /** Up to k nearest live enemies within range of (x, z), nearest first. */
-  private nearest(x: number, z: number, range: number, k: number, exclude?: Set<number>): Enemy[] {
-    if (k === 1) {
-      const e = this.nearestOne(x, z, range, exclude);
-      return e ? [e] : [];
-    }
-    const es = this.enemies;
-    const found: { e: Enemy; d: number }[] = [];
-    const r2 = range * range;
-    this.grid.query(x, z, range, (i) => {
-      const e = es[i];
-      if (!e || !e.alive || (exclude && exclude.has(e.id))) return;
-      const dx = e.x - x;
-      const dz = e.z - z;
-      const d = dx * dx + dz * dz;
-      if (d > r2) return;
-      found.push({ e, d });
-    });
-    found.sort((a, b) => a.d - b.d || a.e.id - b.e.id);
-    const out: Enemy[] = [];
-    for (let i = 0; i < found.length && i < k; i++) out.push(found[i].e);
-    return out;
-  }
-
-  private nearestOne(x: number, z: number, range: number, exclude?: Set<number>): Enemy | null {
-    const es = this.enemies;
-    let best: Enemy | null = null;
-    let bd = range * range;
-    this.grid.query(x, z, range, (i) => {
-      const e = es[i];
-      if (!e || !e.alive || (exclude && exclude.has(e.id))) return;
-      const dx = e.x - x;
-      const dz = e.z - z;
-      const d = dx * dx + dz * dz;
-      if (d < bd || (d === bd && best && e.id < best.id)) {
-        bd = d;
-        best = e;
-      }
-    });
-    return best;
-  }
-
-  private firePulse(chain: Chain): boolean {
-    const P = T.weapons.pulse;
-    const w = chain.parts[0].weapon;
-    const lv = P.levels[w.level]!;
-    const targets = this.nearest(this.x, this.z, P.acquireRange, lv.bolts);
-    if (!targets.length) return false;
-    const damage = P.damage * lv.damageMult * this.build.stats.power;
-    for (let i = 0; i < lv.bolts; i++) {
-      const t = targets[i % targets.length];
-      let dx = t.x - this.x;
-      let dz = t.z - this.z;
-      const d = Math.hypot(dx, dz) || 1;
-      dx /= d;
-      dz /= d;
-      if (i >= targets.length) {
-        // More bolts than targets: fan the extras around the nearest
-        const a = ((i - targets.length + 1) * 8 * Math.PI) / 180 * (i % 2 ? 1 : -1);
-        const c = Math.cos(a);
-        const s = Math.sin(a);
-        [dx, dz] = [dx * c - dz * s, dx * s + dz * c];
-      }
-      this.bolts.push({
-        x: this.x,
-        z: this.z,
-        px: this.x,
-        pz: this.z,
-        dx,
-        dz,
-        speed: P.speed,
-        travelled: 0,
-        range: P.range,
-        radius: P.boltRadius,
-        damage,
-        pierce: lv.pierce,
-        hits: [],
-        chain,
-        part: 0,
-        triggered: false,
-        alive: true,
-      });
-    }
-    return true;
-  }
-
-  private fireTesla(chain: Chain): boolean {
-    const TS = T.weapons.tesla;
-    const w = chain.parts[0].weapon;
-    const lv = TS.levels[w.level]!;
-    const firsts = this.nearest(this.x, this.z, TS.acquireRange, lv.chains);
-    if (!firsts.length) return false;
-    const hit = new Set<number>();
-    const damage = TS.damage * lv.damageMult * this.build.stats.power;
-    const range = TS.jumpRange * this.build.stats.area;
-    for (const first of firsts) {
-      if (hit.has(first.id)) continue;
-      this.teslaWalk(this.x, this.z, first, lv.jumps, 0, lv.fork, damage, range, hit, chain, 0, false);
-    }
-    return true;
-  }
-
-  /** Walk a Tesla chain: each jump hits one enemy and is one hit event. */
-  private teslaWalk(
-    fromX: number,
-    fromZ: number,
-    first: Enemy,
-    jumps: number,
-    hitNo: number,
-    fork: boolean,
-    damage: number,
-    range: number,
-    hit: Set<number>,
-    chain: Chain,
-    part: number,
-    triggered: boolean,
-  ): void {
-    let cx = fromX;
-    let cz = fromZ;
-    let e: Enemy | undefined = first;
-    let left = jumps;
-    let n = hitNo;
-    while (e && left > 0) {
-      hit.add(e.id);
-      this.arcs.push({
-        x1: cx,
-        z1: cz,
-        x2: e.x,
-        z2: e.z,
-        life: T.weapons.tesla.arcLife,
-        maxLife: T.weapons.tesla.arcLife,
-        weapon: 'tesla',
-        triggered,
-      });
-      this.damage(e, damage);
-      this.hitEvent(chain, part, e);
-      left--;
-      n++;
-      cx = e.x;
-      cz = e.z;
-      if (fork && n === T.weapons.tesla.forkAtJump && left > 0) {
-        for (let b = 0; b < 2; b++) {
-          const nb = this.nearest(cx, cz, range, 1, hit)[0];
-          if (nb) this.teslaWalk(cx, cz, nb, left, n, false, damage, range, hit, chain, part, triggered);
-        }
-        return;
-      }
-      e = this.nearest(cx, cz, range, 1, hit)[0];
-    }
+    if (this.bosses.some((b) => !b.alive)) this.bosses = this.bosses.filter((b) => b.alive);
   }
 
   // ---------------------------------------------------------------- Links
 
-  /** A hit by part `part` of `chain` on enemy e: roll for the next part. */
-  private hitEvent(chain: Chain | null, part: number, e: Enemy): void {
-    if (!chain || part >= chain.parts.length - 1) return; // the tail rolls for nothing
+  /** A hit by part `src.part` of its chain on enemy e: roll for the next part. */
+  hit(src: Src, e: Enemy): void {
+    const chain = src.chain;
+    const part = src.part;
+    if (part >= chain.parts.length - 1) return; // the tail rolls for nothing
     const slot = this.build.hardpoints.indexOf(chain);
     if (slot < 0) return; // effect from a chain that has since been re-linked
     const next = part + 1;
@@ -898,125 +913,30 @@ export class World {
       this.codex.add(pair);
       this.events.push({ type: 'codex', pair });
     }
-    const grant = takeTrigger(p, this.triggeredEffects >= T.links.maxTriggeredEffects);
+    let capped = this.triggeredEffects >= T.links.maxTriggeredEffects;
+    if (capped && endOldestContinuous(this)) capped = false;
+    const grant = takeTrigger(p, capped);
     if (!grant) return;
     const power = triggerMult(chain.level) * (1 + grant.power) * this.build.stats.power;
     const size = 1 + grant.size;
-    this.fireTrigger(chain, next, e, power, size);
+    fireTrigger(this, chain, next, e, power, size, pair);
   }
 
-  /** Fire a part's trigger form from the hit point, using its L5 stats. */
-  private fireTrigger(chain: Chain, part: number, src: Enemy, power: number, size: number): void {
-    const id = chain.parts[part].weapon.id;
-    if (id === 'pulse') {
-      const P = T.weapons.pulse;
-      const l5 = P.levels[5]!;
-      // Directional: aim along the line from the mech through the hit point.
-      let dx = src.x - this.x;
-      let dz = src.z - this.z;
-      const d = Math.hypot(dx, dz);
-      if (d < 1e-5) {
-        dx = UP.x;
-        dz = UP.z;
-      } else {
-        dx /= d;
-        dz /= d;
-      }
-      const n = P.trigger.bolts;
-      const spread = (P.trigger.spreadDeg * Math.PI) / 180;
-      for (let i = 0; i < n; i++) {
-        const a = n > 1 ? -spread / 2 + (spread * i) / (n - 1) : 0;
-        const c = Math.cos(a);
-        const s = Math.sin(a);
-        this.bolts.push({
-          x: src.x,
-          z: src.z,
-          px: src.x,
-          pz: src.z,
-          dx: dx * c - dz * s,
-          dz: dx * s + dz * c,
-          speed: P.speed,
-          travelled: 0,
-          range: P.trigger.range,
-          radius: P.boltRadius * size,
-          damage: P.damage * l5.damageMult * power,
-          pierce: l5.pierce,
-          hits: [src.id],
-          chain,
-          part,
-          triggered: true,
-          alive: true,
-        });
-      }
-    } else if (id === 'tesla') {
-      const TS = T.weapons.tesla;
-      const l5 = TS.levels[5]!;
-      const range = TS.jumpRange * this.build.stats.area * size;
-      const hit = new Set<number>([src.id]);
-      const first = this.nearest(src.x, src.z, range, 1, hit)[0];
-      this.triggeredArcsExpire.push(this.time + TS.arcLife);
-      if (first) {
-        this.teslaWalk(src.x, src.z, first, TS.trigger.jumps, 0, false, TS.damage * l5.damageMult * power, range, hit, chain, part, true);
-      }
+  /** An area pulse: rolls for up to 3 random enemies it hit. */
+  areaHits(src: Src, hit: Enemy[]): void {
+    const chain = src.chain;
+    if (src.part >= chain.parts.length - 1 || !hit.length) return;
+    const pool = hit.slice();
+    const n = Math.min(T.links.areaRolls, pool.length);
+    for (let i = 0; i < n; i++) {
+      const e = pool.splice(this.rng.int(pool.length), 1)[0];
+      this.hit(src, e);
     }
   }
 
-  private updateBolts(dt: number): void {
-    const es = this.enemies;
-    for (const b of this.bolts) {
-      if (!b.alive) continue;
-      const step = b.speed * dt;
-      b.x += b.dx * step;
-      b.z += b.dz * step;
-      b.travelled += step;
-      if (b.travelled >= b.range) {
-        b.alive = false;
-        continue;
-      }
-      const reach = b.radius + 1;
-      const cands = this.cands;
-      cands.length = 0;
-      this.grid.query(b.x, b.z, reach, this.collect);
-      if (cands.length > 1) cands.sort((i, j) => i - j);
-      for (const i of cands) {
-        const e = es[i];
-        if (!e || !e.alive || b.hits.includes(e.id)) continue;
-        const rr = b.radius + e.r;
-        const dx = e.x - b.x;
-        const dz = e.z - b.z;
-        if (dx * dx + dz * dz >= rr * rr) continue;
-        b.hits.push(e.id);
-        this.damage(e, b.damage);
-        this.hitEvent(b.chain, b.part, e);
-        if (b.pierce-- <= 0) {
-          b.alive = false;
-          break;
-        }
-      }
-    }
-    // Compact
-    let w = 0;
-    for (let i = 0; i < this.bolts.length; i++) if (this.bolts[i].alive) this.bolts[w++] = this.bolts[i];
-    this.bolts.length = w;
-  }
+  // ---------------------------------------------------------------- XP and pickups
 
-  private updateArcs(dt: number): void {
-    let w = 0;
-    for (let i = 0; i < this.arcs.length; i++) {
-      const a = this.arcs[i];
-      a.life -= dt;
-      if (a.life > 0) this.arcs[w++] = a;
-    }
-    this.arcs.length = w;
-    const ex = this.triggeredArcsExpire;
-    let k = 0;
-    for (let i = 0; i < ex.length; i++) if (ex[i] > this.time) ex[k++] = ex[i];
-    ex.length = k;
-  }
-
-  // ---------------------------------------------------------------- XP
-
-  private dropCores(x: number, z: number, xp: number): void {
+  dropCores(x: number, z: number, xp: number): void {
     let left = xp;
     for (const v of T.xp.coreValues) {
       while (left >= v) {
@@ -1028,7 +948,6 @@ export class World {
 
   private addCore(x: number, z: number, value: number): void {
     const cs = this.cores;
-    const state: 0 | 2 = this.overflowTicks > 0 ? 2 : 0;
     if (cs.length >= T.xp.maxCoresOnGround) {
       let best = 0;
       let bd = Infinity;
@@ -1044,7 +963,12 @@ export class World {
       cs[best].value += value;
       return;
     }
-    cs.push({ x, z, px: x, pz: z, value, state });
+    cs.push({ x, z, px: x, pz: z, value, state: this.overflowTicks > 0 ? 2 : 0 });
+  }
+
+  /** Pull every core on the map to the mech (Overflow, Magnet Pulse). */
+  pullAllCores(): void {
+    for (const c of this.cores) c.state = 2;
   }
 
   private updateCores(dt: number): void {
@@ -1052,13 +976,14 @@ export class World {
     const mag = this.build.stats.magnet;
     const mag2 = mag * mag;
     const pick2 = T.xp.pickupRadius * T.xp.pickupRadius;
+    const alive = !this.dead && !this.won;
     let w = 0;
     for (let i = 0; i < cs.length; i++) {
       const c = cs[i];
       const dx = this.x - c.x;
       const dz = this.z - c.z;
       const d2 = dx * dx + dz * dz;
-      if (!this.dead) {
+      if (alive) {
         if (d2 <= pick2) {
           this.addXp(c.value);
           continue;
@@ -1077,22 +1002,64 @@ export class World {
     cs.length = w;
   }
 
+  private updatePickups(dt: number): void {
+    if (this.dead || this.won) return;
+    const mag = this.build.stats.magnet;
+    const pr = T.pickups.radius;
+    let w = 0;
+    for (const p of this.pickups) {
+      const dx = this.x - p.x;
+      const dz = this.z - p.z;
+      const d = len2(dx, dz);
+      if (d <= pr) {
+        this.collect(p.kind);
+        continue;
+      }
+      if (d <= mag) p.state = 1;
+      if (p.state) {
+        const m = Math.min(1, (T.xp.magnetSpeed * dt) / d);
+        p.x += dx * m;
+        p.z += dz * m;
+      }
+      this.pickups[w++] = p;
+    }
+    this.pickups.length = w;
+  }
+
+  private collect(kind: PickupKind): void {
+    this.events.push({ type: 'pickup', kind });
+    if (kind === 'repair') this.hull = Math.min(this.build.maxHull, this.hull + T.pickups.repairHeal);
+    else if (kind === 'magnet') this.pullAllCores();
+    else {
+      this.cacheLevels++;
+      this.levelUp();
+    }
+  }
+
   addXp(v: number): void {
     this.xp += v;
+    this.xpEarned += v;
     while (this.xp >= xpNext(this.level)) {
       this.xp -= xpNext(this.level);
-      this.level++;
-      this.pendingLevels++;
-      this.events.push({ type: 'levelup' });
+      this.levelUp();
     }
+  }
+
+  /** One level-up: a draft to pick from (queued). Overflow Caches call this directly. */
+  levelUp(): void {
+    this.level++;
+    this.pendingLevels++;
+    this.events.push({ type: 'levelup' });
   }
 
   // ---------------------------------------------------------------- drafting
 
-  private maybeOpenDraft(): void {
-    if (this.draft || this.pendingLevels <= 0 || this.dead || this.overflowTicks > 0) return;
+  maybeOpenDraft(): void {
+    if (this.draft || this.pendingLevels <= 0 || this.dead || this.won || this.overflowTicks > 0) return;
     if (this.benchCount > 0) return; // benchmarks run uninterrupted
-    const withLink = linkOptions(this.build, this.linkLevel).length > 0 && !this.lastDraftHadLink;
+    const possible = linkOptions(this.build, this.linkLevel).length > 0;
+    const withLink = possible && (this.forceLinkDraft || !this.lastDraftHadLink);
+    this.forceLinkDraft = false;
     this.draft = makeDraft(this.draftContext(), this.rng, withLink);
     this.draftHasLink = this.draft.some((c) => c.type === 'link');
     this.lastDraftHadLink = this.draftHasLink;
@@ -1138,10 +1105,18 @@ export class World {
     this.build.stats[stat] = Math.min(def.cap, this.build.stats[stat] + def.step);
   }
 
-  private formLink(opt: LinkOption, order: WeaponId[]): void {
+  private formLink(opt: LinkOption, order: WeaponId[]): Chain {
     const chain = applyLink(this.build, opt, order);
     this.hitStopTicks = Math.round(T.sim.linkHitStop * T.sim.tickRate);
+    this.linksMade++;
+    this.addFeat('firstLink');
+    if (this.linksMade >= 3) this.addFeat('threeLinks');
+    if (chain.parts.length >= 3) {
+      this.addFeat('apex');
+      this.apexes.add(chainKey(chain));
+    }
     this.events.push({ type: 'link', chain: chain.parts.map((p) => p.weapon.id) });
+    return chain;
   }
 
   // ---------------------------------------------------------------- dev
@@ -1160,9 +1135,16 @@ export class World {
         break;
       }
       case 'link': {
-        // Grant every part at the Link level, then Link them in the given order.
+        // Grant every part at the Link level (freeing a hardpoint if needed), then Link them in order.
         for (const id of c.chain) {
-          const w = findWeapon(b, id) ?? addWeapon(b, id);
+          let w = findWeapon(b, id);
+          if (!w) {
+            if (b.hardpoints.indexOf(null) < 0) {
+              const drop = b.hardpoints.findIndex((ch) => ch && ch.parts.length === 1 && !c.chain.includes(ch.parts[0].weapon.id));
+              if (drop >= 0) b.hardpoints[drop] = null;
+            }
+            w = addWeapon(b, id) ?? undefined;
+          }
           if (w) w.level = Math.max(w.level, this.linkLevel);
         }
         const [h, t, third] = c.chain;
@@ -1170,8 +1152,7 @@ export class World {
           (o) => o.kind === 'pair' && o.orders.some((ord) => ord[0] === h && ord[1] === t),
         );
         if (!opt) break;
-        this.formLink(opt, [h, t]);
-        const chain = b.hardpoints.find((ch) => ch && ch.parts[0].weapon.id === h)!;
+        const chain = this.formLink(opt, [h, t]);
         chain.level = Math.max(1, Math.min(5, c.chainLevel));
         if (third) {
           chain.level = Math.max(chain.level, T.links.apexMinChainLevel);
@@ -1192,12 +1173,18 @@ export class World {
         } else b.stats[c.stat] = c.value;
         break;
       case 'surge':
-        if (this.surgePhase !== 'surge') this.startSurge();
+        devSurge(this, c.n);
+        break;
+      case 'boss':
+        devBoss(this, c.kind);
+        break;
+      case 'elite':
+        devElite(this);
         break;
       case 'spawn':
         for (let i = 0; i < c.count; i++) {
-          const p = this.spawnPoint();
-          this.spawnEnemy('mite', p.x, p.z, 0);
+          const p = spawnPoint(this);
+          this.spawnEnemy(c.kind ?? 'mite', p.x, p.z, 0);
         }
         break;
       case 'god':
@@ -1213,7 +1200,11 @@ export class World {
         break;
       case 'time':
         this.time = c.seconds;
-        while (this.surgeIndex < T.surge.schedule.length && T.surge.schedule[this.surgeIndex].time < this.time) this.surgeIndex++;
+        while (this.surgeIndex < T.surge.schedule.length && T.surge.schedule[this.surgeIndex].time < this.time) {
+          this.surgeIndex++;
+          this.surgeCount++;
+        }
+        while (this.nextElite < this.time) this.nextElite += T.elite.every;
         break;
       case 'xp':
         this.addXp(c.amount);
@@ -1251,7 +1242,7 @@ export class World {
       ex.toFixed(4),
       ez.toFixed(4),
       hp.toFixed(4),
-      this.bolts.length,
+      this.bolts.length + this.missiles.length + this.shells.length + this.zones.length,
       this.cores.length,
       weapons,
       this.rng.state().join(':'),
@@ -1259,7 +1250,11 @@ export class World {
   }
 }
 
-function clampAbs(v: number, lim: number): number {
+export function chainKey(c: Chain): string {
+  return c.parts.map((p) => p.weapon.id).join('>');
+}
+
+export function clampAbs(v: number, lim: number): number {
   return v < -lim ? -lim : v > lim ? lim : v;
 }
 
@@ -1268,9 +1263,9 @@ export function decodeInput(code: number): [number, number] {
   return [Math.floor(code / 3) - 1, (code % 3) - 1];
 }
 
-/** Rebuild a run from its seed and logs. */
-export function replay(seed: number, inputs: number[], log: LogEvent[]): World {
-  const w = new World({ seed });
+/** Rebuild a run from its options and logs. */
+export function replay(opts: WorldOptions, inputs: number[], log: LogEvent[]): World {
+  const w = new World(opts);
   let li = 0;
   const applyDue = () => {
     while (li < log.length && log[li].tick === w.tick) {

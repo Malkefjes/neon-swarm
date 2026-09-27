@@ -33,13 +33,13 @@ describe('Link eligibility and structure', () => {
     const b = makeBuild(4, 100, 5);
     const p = addWeapon(b, 'pulse')!;
     const t = addWeapon(b, 'tesla')!;
-    expect(linkOptions(b)).toHaveLength(0);
+    expect(linkOptions(b, 5)).toHaveLength(0);
     p.level = 5;
-    expect(linkOptions(b)).toHaveLength(0);
+    expect(linkOptions(b, 5)).toHaveLength(0);
     t.level = 4;
-    expect(linkOptions(b)).toHaveLength(0);
+    expect(linkOptions(b, 5)).toHaveLength(0);
     t.level = 5;
-    const opts = linkOptions(b);
+    const opts = linkOptions(b, 5);
     expect(opts).toHaveLength(1);
     expect(opts[0].orders).toEqual([
       ['pulse', 'tesla'],
@@ -51,7 +51,7 @@ describe('Link eligibility and structure', () => {
     const b = makeBuild(4, 100, 5);
     addWeapon(b, 'pulse', 5);
     addWeapon(b, 'tesla', 5);
-    const opt = linkOptions(b)[0];
+    const opt = linkOptions(b, 5)[0];
     const chain = applyLink(b, opt, ['tesla', 'pulse']);
     expect(chain.parts.map((p) => p.weapon.id)).toEqual(['tesla', 'pulse']);
     expect(chain.level).toBe(1);
@@ -68,19 +68,19 @@ describe('Link eligibility and structure', () => {
     const b = makeBuild(4, 100, 5);
     const p = addWeapon(b, 'pulse', 5)!;
     addWeapon(b, 'tesla', 5);
-    const chain = applyLink(b, linkOptions(b)[0], ['pulse', 'tesla']);
+    const chain = applyLink(b, linkOptions(b, 5)[0], ['pulse', 'tesla']);
     // A stand-in third weapon (only two are implemented in milestone 1)
     const third = { id: 'pulse' as const, level: 5, cooldown: 0 };
     b.hardpoints[1] = { parts: [makePart(third)], level: 0 };
     chain.level = 2;
-    expect(linkOptions(b).filter((o) => o.kind === 'apex')).toHaveLength(0);
+    expect(linkOptions(b, 5).filter((o) => o.kind === 'apex')).toHaveLength(0);
     chain.level = 3;
-    const apex = linkOptions(b).filter((o) => o.kind === 'apex');
+    const apex = linkOptions(b, 5).filter((o) => o.kind === 'apex');
     expect(apex).toHaveLength(1);
     expect(apex[0].orders.map((o) => o.length)).toEqual([3, 3]);
     // A three-part chain can't grow further
     chain.parts.push(makePart({ ...p, id: 'tesla' }));
-    expect(linkOptions(b).filter((o) => o.kind === 'apex')).toHaveLength(0);
+    expect(linkOptions(b, 5).filter((o) => o.kind === 'apex')).toHaveLength(0);
   });
 });
 
@@ -152,7 +152,7 @@ describe('trigger resolution in play', () => {
       w.step(0, 0);
       for (const a of w.arcs) if (a.triggered) triggeredArcs++;
       else untriggeredArcs++;
-      for (const b of w.bolts) if (b.triggered) triggeredBolts++;
+      for (const b of w.bolts) if (b.src.triggered) triggeredBolts++;
     }
     expect(untriggeredArcs).toBe(0); // Tesla is linked in: no solo fire
     expect(triggeredArcs).toBeGreaterThan(0); // Pulse hits trigger Tesla
@@ -169,7 +169,7 @@ describe('trigger resolution in play', () => {
     let soloArcs = 0;
     for (let i = 0; i < 300; i++) {
       w.step(0, 0);
-      for (const b of w.bolts) if (b.triggered) triggeredBolts++;
+      for (const b of w.bolts) if (b.src.triggered) triggeredBolts++;
       else soloBolts++;
       for (const a of w.arcs) if (!a.triggered) soloArcs++;
     }

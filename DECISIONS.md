@@ -60,4 +60,52 @@ Engineering decisions made while building Neon Swarm, per the working rules in
 
 ### Tuning changes
 
-None yet: every appendix value is as written. Values the appendix doesn't give (all in `src/tuning.ts`): Pulse acquire range 13 u and bolt range 14 u, Pulse trigger fan 40°, Tesla acquire range 9 u, Tesla arc life 0.18 s, ring radius 16 u and spacing 0.85 u, core speeds (14 / 30 u/s) and pickup radius 0.9 u, crowd separation 0.5, camera follow 6/s and look-ahead 0.35 s, death slow-mo 0.6 s at 30%.
+None in milestone 1: every appendix value was as written. Values the appendix doesn't give (all in `src/tuning.ts`): Pulse acquire range 13 u and bolt range 14 u, Pulse trigger fan 40°, Tesla acquire range 9 u, Tesla arc life 0.18 s, ring radius 16 u (20 u from milestone 2) and spacing 0.85 u, core speeds (14 / 30 u/s) and pickup radius 0.9 u, crowd separation 0.5, camera follow 6/s and look-ahead 0.35 s, death slow-mo 0.6 s at 30%.
+
+## Milestone 2
+
+### Rules the design leaves open (silent)
+
+| # | Decision | Reason |
+| --- | --- | --- |
+| 34 | Arc Coil pulses a filled disc around the mech and only fires when an enemy is inside it; its L5 static field stays where it pulsed. Seeker Swarm missiles fly at 11 u/s, turn at 6 rad/s, live 2.5 s and burst on contact; they launch fanned out at the nearest enemies within 14 u. Blade Drones spin at 3.2 rad/s (Rate speeds up the spin); the 0.5 s per-enemy cooldown is shared by all the weapon's blades. Plasma Mortar shells fly 0.7 s to random enemies within 13 u; pool radius = 0.75 × blast; L4's +40% applies to shell and pool. Area scales every radius (rings, blasts, pools, blade orbit and size, Tesla jump range, bolt size). | Simplest readings of the weapon tables. |
+| 35 | Auto-aim: a boss in range takes the first shot (Pulse's first bolt, Tesla's first chain, Seeker's first missile, Mortar's first shell); the rest go to the nearest enemies. | With pure nearest-first aim, the Overmind's summoned horde soaked almost all fire. |
+| 36 | Trigger forms: the Arc ring hits the enemy that sourced it too; Seeker trigger missiles hunt the 2 nearest other enemies; a triggered blade orbits the fixed hit point; the Mortar trigger is the pool only. Missile blasts are projectile hits (one roll per enemy hit); Arc rings and Mortar shell impacts are area pulses. | Link rules §1 table. |
+| 37 | Continuous effects roll on their 0.5 s damage ticks; each triggered blade keeps its own 0.5 s per-enemy cooldown. | "One roll per enemy per 0.5 s of contact." |
+| 38 | Skitters zig-zag ±40° off their heading, switching every 0.6 s. A Carapace's front is the 90° arc around its direction of travel, judged from where the damage comes from (bolt path, blast centre, previous Tesla jump, blade position). Splitter Mites have current-time HP and don't count toward the Surge. Elites keep their unit's shape at 3× size and are never despawned; Shielded elites glow blue until the shield breaks. | Simplest readings. |
+| 39 | The crowd pushes by mass (1/r²), so big units shove small ones; bosses don't move for the crowd. Carapaces (elite or not) and bosses block the mech. | "Stopped by Carapaces." |
+| 40 | Elites come only from the forced one every 90 s from 2:00 and the Overmind's summons; affix 50/50; unit kind from the current mix. 50 ms hit-stop when one dies. | The director budget alone never buys elites. |
+| 41 | Spitters arrive in milestone 3: their mix weight is dropped (the rest renormalise), Mites stand in for Surge 7's Spitter line, and Surge 9's "every unit type" is the other four. | Milestone scope. |
+| 42 | Formations: Wall = rows 46 u long starting 19 u off one side, sweeping 30 u across before hunting; Tide = a packed disc 20 u off one side; Surge 4 = Mite rings with a Carapace ring (15% of the Surge) outside; Two Walls split 50/50 from opposite sides; Surge 7 = Carapace line (15%) then a Mite tide; Double Ring = Splitters inner (30%), Mites outer; Surge 9 = half a wall, half a ring. Unit splits: Surge 2 70/30 Mite/Skitter, Surge 3 90/10 Mite/Carapace, Surge 6 50/50 Skitter/Splitter. | The table gives formations and units, not counts. |
+| 43 | Surge size uses the schedule slot n (the Brood Mother is slot 5), matching the table's base sizes. A Surge slower than 25 s makes the next one ×0.85. | Design says "smaller" without a number. |
+| 44 | A living Brood Mother doesn't hold back the next Surge; normal spawns continue during her fight. She spawns 16 u from the mech. Charge every 7 s (24 u/s dash), contact 15; Acid Spit every 5 s, globs 6 u/s over 11 u for 8 damage; puddles 1.3 u, 6 damage per touch; Brood Burst ring 3.5 u. | Timings the design doesn't give. |
+| 45 | Her guaranteed Link card is one extra draft (not a level) that always holds a Link card; with no Link possible she drops 2 Overflow Caches. | Simplest delivery. |
+| 46 | Overmind: a 3.5 u core at the arena centre; beams 45 u long and 0.9 u wide; summoned elites appear 5 u from its edge; homing orbs every 2.5 s at 3 u/s (turn 1.2 rad/s, 10 damage, 9 s life). Summons and orbs continue into phase 3. The collapse starts from the arena's inscribed circle (100 u). | Numbers the design doesn't give. |
+| 47 | Repair Kit and Magnet Pulse drop from kills at the appendix chances and cooldowns; pickups are collected at 0.9 u and pulled by the magnet like cores. An Overflow Cache is an instant level-up (one extra draft). | Simplest. |
+| 48 | Screens: Title → Hangar (frames with lock state, unlock list, Codex) → Deploy goes straight to the Orbital Station at Threat 0. The pre-run biome and Threat screen arrives with the Moon and Threat Levels in milestone 3; SPARK and COLOSSUS show their lock state but deploy from milestone 3; settings are milestone 4. | Nothing to choose yet. |
+| 49 | Codex "best kill count with that Link" = kills by effects that ordered pair triggered, best of any run; an Apex's best = kills by any part of that chain in a run. New Codex entries and unlocks are saved the moment they happen; best kills at run end (or restart). | Keeps progress if the tab closes mid-run. |
+| 50 | Run summary: final build as chains, damage per chain (earlier configurations marked "before Link"), new Codex entries, unlocks earned; Enter deploys again, H returns to the Hangar. | The design's summary contents. |
+| 51 | HUD adds a boss health bar with the Overmind's phase, and off-screen arrows for elites and bosses. | The phases are HP thresholds the player needs to read; arrows are in the HUD list. |
+| 52 | Apex chains are listed by their parts until Apex names arrive in milestone 4. | Milestone scope. |
+| 53 | Pacing checkpoints compare the XP level: levels earned from XP, not from Overflow Caches. The design derives the checkpoints from the XP curve and lists "~L41, plus ~8 Overflow Caches". The level shown in game includes cache levels (about +4 at 7:30, +9 at 15:00). | Matches how the design table was built. |
+| 54 | Small screen shake on elite death and a bigger one on boss death, as in Art direction. The toggle arrives with settings (milestone 4). | Milestone scope. |
+
+### Design fixes (flag in summary)
+
+| # | Rule | Fix |
+| --- | --- | --- |
+| F2 | The XP curve (10 + 12L) and the kill rates (60 + 40t per minute, Mites worth 1 XP) can't both hold: by 3:00 they give about 540 XP, but L12 needs 902, while the late game gives more than L41 needs. | Tuning: Mite XP 1 → 2 and XP per level 12 → 16 (below). |
+| F3 | Overmind 60,000 HP against the 20:00 enrage: on-pace builds took 5–7 minutes, running into the enrage nearly every time. | Tuning: 60,000 → 36,000 (below). |
+
+### Tuning changes
+
+| Value | Old | New | Why |
+| --- | --- | --- | --- |
+| `enemies.mite.xp` | 1 | 2 | Early XP comes almost only from Mites; at 1 XP, simulated runs reached XP level ~7 at 3:00 (target 12). |
+| `xp.perLevel` | 12 | 16 | With Mite XP 2, later levels came too fast (XP level ~50 at 15:00). At 16, 20 of 20 simulated runs are within ±3 of all three checkpoints (means 11.3 / 22.8 / 42.1). |
+| `bosses.overmind.hp` | 60,000 | 36,000 | On-pace builds deal ~150–250 DPS to the core under beam pressure; 60,000 HP took 5–7 minutes, past the 20:00 enrage. 36,000 takes about 3 minutes. |
+| `surge.ringRadius` (not in appendix) | 16 u | 20 u | Ring Surges broke in ~7 s (target 8–20 s) because every unit arrives at once. |
+| `surge.wallMarch` (not in appendix) | 42 u | 30 u | Two Walls broke in ~23 s because units marched far past the mech before hunting. With both changes, 124 of 160 simulated Surge breaks land in 8–20 s and 8 take over 25 s. |
+| `crowd.cellSize` (not in appendix) | 1.2 u | 1.8 u | Performance only: a 3 × 3 cell walk now covers every overlap. |
+
+Values the appendix doesn't give for milestone 2 are in `src/tuning.ts` next to their weapon, unit or boss, and summarised in entries 34–47 above.

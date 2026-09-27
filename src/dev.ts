@@ -6,7 +6,9 @@
 //   &stat=rate:2,power:1.5       set stats
 //   &bench=800[&minutes=15]      keep 800 enemies on screen (god mode), HP as at 15:00
 //   &stress=1                    every trigger roll succeeds
-//   &god=1  &t=85  &surge=1  &autostart=1
+//   &god=1  &t=85  &surge=1  &boss=brood|overmind  &elite=1  &autostart=1
+//   &bot=1                       autopilot plays the run
+//   &speed=4                     run the sim 4x faster than real time
 // window.neon exposes the same controls for scripting.
 import { TUNING, type StatId, type WeaponId } from './tuning';
 import type { DevCommand, World } from './sim/world';
@@ -86,6 +88,9 @@ export function commandsFromUrl(params: URLSearchParams): DevCommand[] {
   const bench = params.get('bench');
   if (bench) out.push({ cmd: 'bench', count: Number(bench), minutes: Number(params.get('minutes') ?? 15) });
   if (params.get('surge') === '1') out.push({ cmd: 'surge' });
+  const boss = params.get('boss');
+  if (boss === 'brood' || boss === 'overmind') out.push({ cmd: 'boss', kind: boss });
+  if (params.get('elite') === '1') out.push({ cmd: 'elite' });
   return out;
 }
 
@@ -131,20 +136,15 @@ function cascadeRate(p: { fired: number }): string {
 }
 
 export function buildPanel(el: HTMLElement, getWorld: () => World, restart: () => void): void {
+  const weapons = TUNING.startingWeapons;
   const groups: [string, [string, () => void][]][] = [
-    [
-      'Weapons',
-      [
-        ['Pulse +1', () => lvl('pulse')],
-        ['Tesla +1', () => lvl('tesla')],
-        ['Both L5', () => ['pulse', 'tesla'].forEach((id) => dev({ cmd: 'grant', weapon: id as WeaponId, level: 5 }))],
-      ],
-    ],
+    ['Weapons +1 level', weapons.map((id) => [TUNING.weaponInfo[id].name.split(' ')[0], () => lvl(id)] as [string, () => void])],
     [
       'Links',
       [
         ['Pulse>Tesla', () => dev({ cmd: 'link', chain: ['pulse', 'tesla'], chainLevel: 1 })],
-        ['Tesla>Pulse', () => dev({ cmd: 'link', chain: ['tesla', 'pulse'], chainLevel: 1 })],
+        ['Seeker>Tesla>Mortar', () => dev({ cmd: 'link', chain: ['seeker', 'tesla', 'mortar'], chainLevel: 3 })],
+        ['Blades>Arc', () => dev({ cmd: 'link', chain: ['blades', 'arc'], chainLevel: 1 })],
         ['Chain Lv +1', () => chainUp()],
       ],
     ],
@@ -152,13 +152,16 @@ export function buildPanel(el: HTMLElement, getWorld: () => World, restart: () =
       'Run',
       [
         ['Surge now', () => dev({ cmd: 'surge' })],
+        ['Brood Mother', () => dev({ cmd: 'boss', kind: 'brood' })],
+        ['Overmind', () => dev({ cmd: 'boss', kind: 'overmind' })],
+        ['Elite', () => dev({ cmd: 'elite' })],
         ['Level up', () => dev({ cmd: 'xp', amount: getWorld().xpToNext - getWorld().xp })],
         ['+100 enemies', () => dev({ cmd: 'spawn', count: 100 })],
         ['God', () => dev({ cmd: 'god', on: !getWorld().god })],
         ['Stress', () => dev({ cmd: 'stress', on: !getWorld().stress })],
         ['Rate max', () => dev({ cmd: 'stat', stat: 'rate', value: TUNING.stats.rate.cap })],
         ['Bench 800', () => dev({ cmd: 'bench', count: 800, minutes: 15 })],
-        ['Skip to 1:20', () => dev({ cmd: 'time', seconds: 80 })],
+        ['Skip +60 s', () => dev({ cmd: 'time', seconds: getWorld().time + 60 })],
         ['Restart', () => restart()],
       ],
     ],

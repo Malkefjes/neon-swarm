@@ -1,5 +1,5 @@
-// DOM HUD, level-up cards and screen overlays.
-import { TUNING, type StatId, type WeaponId } from '../tuning';
+// DOM HUD, level-up cards and in-run feedback overlays.
+import { TUNING, type AnyWeaponId, type StatId, type WeaponId } from '../tuning';
 import type { Card } from '../sim/draft';
 import { linkOptions } from '../sim/build';
 import type { World, WorldEvent } from '../sim/world';
@@ -15,25 +15,24 @@ const STAT_TEXT: Record<StatId, [string, string]> = {
   magnet: ['Magnet', '+0.5 u pickup radius'],
 };
 
-const TRIGGER_TEXT: Record<WeaponId, string> = {
-  pulse: 'a 3-bolt Pulse burst',
-  tesla: 'a 3-jump Tesla chain',
-};
-
-function name(id: WeaponId): string {
-  return TUNING.weapons[id].name;
+export function wname(id: AnyWeaponId): string {
+  return TUNING.weaponInfo[id].name;
 }
 
-function colour(id: WeaponId): string {
-  return '#' + TUNING.weapons[id].colour.toString(16).padStart(6, '0');
+export function wshort(id: AnyWeaponId): string {
+  return wname(id).split(' ')[0];
 }
 
-function icon(id: WeaponId): string {
+export function colour(id: AnyWeaponId): string {
+  return '#' + TUNING.weaponInfo[id].colour.toString(16).padStart(6, '0');
+}
+
+export function icon(id: AnyWeaponId): string {
   return `<span class="icon" style="background:${colour(id)};box-shadow:0 0 6px ${colour(id)}"></span>`;
 }
 
-function chainHtml(ids: WeaponId[]): string {
-  return ids.map((id) => `${icon(id)}${name(id).split(' ')[0]}`).join(' <span class="arrow">&rarr;</span> ');
+export function chainHtml(ids: AnyWeaponId[]): string {
+  return ids.map((id) => `${icon(id)}${wshort(id)}`).join(' <span class="arrow">&rarr;</span> ');
 }
 
 export function fmtTime(s: number): string {
@@ -42,11 +41,19 @@ export function fmtTime(s: number): string {
   return `${m}:${r.toString().padStart(2, '0')}`;
 }
 
+function linkLine(ord: WeaponId[]): string {
+  return ord
+    .slice(1)
+    .map((id, k) => `${wshort(ord[k])} hits can fire ${TUNING.weapons[id].triggerText}`)
+    .join('; ');
+}
+
 export class Hud {
   private last: Record<string, string> = {};
   /** Index of a Link card awaiting its order choice, or -1. */
   linkPending = -1;
   private cardsShown: Card[] | null = null;
+  private toastT = 0;
 
   constructor(private onPick: (i: number, order: number) => void) {}
 
@@ -63,9 +70,14 @@ export class Hud {
 
   show(on: boolean): void {
     $('hud').hidden = !on;
+    $('indicators').hidden = !on;
+    if (!on) {
+      $('cards').hidden = true;
+      this.cardsShown = null;
+    }
   }
 
-  update(w: World): void {
+  update(w: World, toPixels: (x: number, z: number) => { x: number; y: number }): void {
     this.set('xpfill', 'width', `${Math.min(100, (w.xp / w.xpToNext) * 100).toFixed(1)}%`);
     this.set('level', 'text', `L${w.level}`);
     this.set('timer', 'text', fmtTime(w.time));
@@ -75,25 +87,34 @@ export class Hud {
 
     let surge = '';
     let cls = '';
+    const next = w.nextThreat;
     if (w.surgePhase === 'surge') {
       const need = Math.ceil(w.surgeSize * TUNING.surge.breakFraction);
       surge = `SURGE ${w.surgeCount} — break ${Math.min(w.surgeKilled, need)} / ${need}`;
       cls = 'warn';
     } else if (w.surgePhase === 'breath') {
-      surge = `SURGE INCOMING ${Math.ceil(w.nextSurgeIn ?? 0)}`;
+      surge = `${next?.boss ?? 'SURGE'} INCOMING ${Math.ceil(next?.in ?? 0)}`;
       cls = 'warn';
-    } else if (w.nextSurgeIn !== null) {
-      surge = `Next Surge ${fmtTime(Math.ceil(w.nextSurgeIn))}`;
+    } else if (next) {
+      surge = `${next.boss ? next.boss : 'Next Surge'} ${fmtTime(Math.ceil(next.in))}`;
     }
     this.set('surge', 'text', surge);
     this.set('surge', 'class', cls);
-    this.set('fx-breath', 'class', w.surgePhase === 'breath' ? 'fx on' : 'fx');
-    this.set('fx-dim', 'class', w.surgePhase === 'breath' ? 'fx on' : 'fx');
+    const breath = w.surgePhase === 'breath';
+    this.set('fx-breath', 'class', breath ? 'fx on' : 'fx');
+    this.set('fx-dim', 'class', breath ? 'fx on' : 'fx');
+
+    // Boss bar
+    const boss = w.bosses[0];
+    $('bossbar').hidden = !boss;
+    if (boss) {
+      this.set('bossname', 'text', boss.kind === 'brood' ? 'BROOD MOTHER' : `OVERMIND — PHASE ${boss.boss?.phase ?? 1}`);
+      this.set('bossfill', 'width', `${Math.max(0, (boss.hp / boss.maxHp) * 100).toFixed(1)}%`);
+    }
 
     // Hardpoints: weapons with level pips, Links joined by a conduit
-    const ready = linkOptions(w.build, w.linkLevel);
     const readySlots = new Set<number>();
-    for (const o of ready) {
+    for (const o of linkOptions(w.build, w.linkLevel)) {
       readySlots.add(o.a);
       readySlots.add(o.b);
     }
@@ -113,7 +134,37 @@ export class Hud {
       .join('');
     this.set('hardpoints', 'html', hp);
 
+    this.updateIndicators(w, toPixels);
     this.updateCards(w);
+    if (this.toastT > 0 && --this.toastT === 0) $('toast').textContent = '';
+  }
+
+  /** Off-screen indicators for elites and bosses. */
+  private updateIndicators(w: World, toPixels: (x: number, z: number) => { x: number; y: number }): void {
+    const W = window.innerWidth;
+    const H = window.innerHeight;
+    const pad = 22;
+    let html = '';
+    for (const e of w.enemies) {
+      if (!e.elite && !e.boss) continue;
+      const p = toPixels(e.x, e.z);
+      if (p.x > 0 && p.x < W && p.y > 0 && p.y < H) continue;
+      const cx = W / 2;
+      const cy = H / 2;
+      const dx = p.x - cx;
+      const dy = p.y - cy;
+      const k = Math.min((cx - pad) / Math.abs(dx || 1e-6), (cy - pad) / Math.abs(dy || 1e-6));
+      const x = cx + dx * k;
+      const y = cy + dy * k;
+      const ang = (Math.atan2(dy, dx) * 180) / Math.PI + 90;
+      html += `<div class="ind${e.boss ? ' boss' : ''}" style="left:${x.toFixed(0)}px;top:${y.toFixed(0)}px;transform:translate(-50%,-50%) rotate(${ang.toFixed(0)}deg)"></div>`;
+    }
+    this.set('indicators', 'html', html);
+  }
+
+  toast(text: string, frames = 150): void {
+    $('toast').textContent = text;
+    this.toastT = frames;
   }
 
   private updateCards(w: World): void {
@@ -135,18 +186,16 @@ export class Hud {
       const card = w.draft[this.linkPending];
       if (card.type === 'link') {
         el.innerHTML =
-          `<div class="kind" style="letter-spacing:2px">PICK THE HEAD</div><div class="row">` +
+          `<div class="kind" style="letter-spacing:2px">PICK THE ${card.option.kind === 'apex' ? 'ORDER' : 'HEAD'}</div><div class="row">` +
           card.option.orders
             .map(
               (ord, i) =>
-                `<div class="card link" data-order="${i}"><span class="key">${i + 1}</span><div class="kind">Link order</div>` +
-                `<div class="name">${chainHtml(ord)}</div><div class="text">${this.linkLine(ord)}</div></div>`,
+                `<div class="card link" data-order="${i}"><span class="key">${i + 1}</span><div class="kind">${card.option.kind === 'apex' ? (i === 0 ? 'Apex: new head' : 'Apex: new tail') : 'Link order'}</div>` +
+                `<div class="name">${chainHtml(ord)}</div><div class="text">${linkLine(ord)}</div></div>`,
             )
             .join('') +
           `</div><div class="cards-foot"><kbd>1</kbd>/<kbd>2</kbd> pick order &nbsp; <kbd>Esc</kbd> back</div>`;
-        el.querySelectorAll<HTMLElement>('.card').forEach((c) =>
-          c.addEventListener('click', () => this.pickOrder(Number(c.dataset.order))),
-        );
+        el.querySelectorAll<HTMLElement>('.card').forEach((c) => c.addEventListener('click', () => this.pickOrder(Number(c.dataset.order))));
         return;
       }
     }
@@ -157,13 +206,6 @@ export class Hud {
     el.querySelectorAll<HTMLElement>('.card').forEach((c) => c.addEventListener('click', () => this.pick(w, Number(c.dataset.i))));
   }
 
-  private linkLine(ord: WeaponId[]): string {
-    return ord
-      .slice(1)
-      .map((id, k) => `${name(ord[k]).split(' ')[0]} hits can fire ${TRIGGER_TEXT[id]} from the hit`)
-      .join('; ');
-  }
-
   private cardHtml(w: World, c: Card, i: number): string {
     let kind = '';
     let title = '';
@@ -172,12 +214,12 @@ export class Hud {
     switch (c.type) {
       case 'level':
         kind = `Weapon level ${c.to}`;
-        title = `${icon(c.weapon)}${name(c.weapon)}`;
+        title = `${icon(c.weapon)}${wname(c.weapon)}`;
         text = TUNING.weapons[c.weapon].levelText[c.to];
         break;
       case 'new':
         kind = 'New weapon';
-        title = `${icon(c.weapon)}${name(c.weapon)}`;
+        title = `${icon(c.weapon)}${wname(c.weapon)}`;
         text = TUNING.weapons[c.weapon].levelText[1];
         break;
       case 'stat':
@@ -187,16 +229,15 @@ export class Hud {
         break;
       case 'chain': {
         kind = `Chain Level ${c.to}`;
-        const chain = w.build.hardpoints[c.slot]!;
-        title = chainHtml(chain.parts.map((p) => p.weapon.id));
+        title = chainHtml(w.build.hardpoints[c.slot]!.parts.map((p) => p.weapon.id));
         text = '+10% trigger power, +15% trigger chance';
         break;
       }
       case 'link':
-        kind = 'LINK';
+        kind = c.option.kind === 'apex' ? 'LINK — APEX' : 'LINK';
         cls += ' link';
-        title = chainHtml(c.option.orders[0]);
-        text = `${this.linkLine(c.option.orders[0])}. Frees a hardpoint. You pick the head.`;
+        title = chainHtml(c.option.orders[c.option.kind === 'apex' ? 1 : 0]);
+        text = `${linkLine(c.option.orders[c.option.kind === 'apex' ? 1 : 0])}. Frees a hardpoint. You pick the order.`;
         break;
     }
     return `<div class="${cls}" data-i="${i}"><span class="key">${i + 1}</span><div class="kind">${kind}</div><div class="name">${title}</div><div class="text">${text}</div></div>`;
@@ -231,7 +272,9 @@ export class Hud {
     this.updateCards(w);
   }
 
-  effects(events: WorldEvent[]): void {
+  /** Screen feedback for sim events. Returns screen-shake to add. */
+  effects(events: WorldEvent[]): number {
+    let shake = 0;
     for (const ev of events) {
       switch (ev.type) {
         case 'hurt':
@@ -246,19 +289,22 @@ export class Hud {
         case 'overflow':
           retrigger('fx-flash', 'big');
           break;
+        case 'eliteDown':
+          shake = Math.max(shake, 0.4);
+          break;
+        case 'bossDown':
+          retrigger('fx-flash', 'big');
+          shake = Math.max(shake, 1.2);
+          break;
+        case 'boss':
+          this.toast(ev.kind === 'brood' ? 'BROOD MOTHER' : 'OVERMIND');
+          break;
+        case 'codex':
+          this.toast(`NEW LINK LOGGED  ${ev.pair.replace('>', ' → ').toUpperCase()}`);
+          break;
       }
     }
-  }
-
-  showOver(w: World): void {
-    $('over-panel').innerHTML =
-      `<h2>HULL 0</h2><p>Survived ${fmtTime(w.time)} &nbsp; L${w.level} &nbsp; ${w.kills} kills</p>` +
-      `<p>${w.build.hardpoints
-        .filter((c) => c)
-        .map((c) => chainHtml(c!.parts.map((p) => p.weapon.id)))
-        .join(' &nbsp;|&nbsp; ')}</p>` +
-      `<p class="go"><kbd>Enter</kbd> Deploy again</p>`;
-    $('over').hidden = false;
+    return shake;
   }
 }
 
