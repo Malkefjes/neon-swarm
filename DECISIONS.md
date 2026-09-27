@@ -144,7 +144,7 @@ Values the appendix doesn't give for milestone 2 are in `src/tuning.ts` next to 
 
 | Value | Old | New | Why |
 | --- | --- | --- | --- |
-| `xp.base` | 10 | 6 | With the milestone 3 roster, 1 of 20 simulated runs fell more than 3 levels short at 3:00. At 6, 20 of 20 runs are within ±3 at every checkpoint (averages 12.0 / 23.1 / 42.0; with all 10 weapons unlocked too). |
+| `xp.base` | 10 | 6 | With the milestone 3 roster, 1 of 20 simulated runs fell more than 3 levels short at 3:00. At 6, 20 of 20 runs (starting weapons) are within ±3 at every checkpoint (averages 12.0 / 23.1 / 42.0). With all 10 weapons unlocked, 19 of 20 are: one autopilot run stalls early (XP level 3 at 3:00). |
 
 The four new weapons, the Spitter, SPARK, COLOSSUS and the Threat Levels use the appendix values. Numbers the appendix doesn't give are in `src/tuning.ts` (weapons, `threat`, `endless`, `maps`) and summarised above.
 
