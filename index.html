@@ -1,0 +1,48 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>Neon Swarm</title>
+    <link rel="icon" href="data:," />
+  </head>
+  <body>
+    <canvas id="view"></canvas>
+    <div id="fx-dim" class="fx"></div>
+    <div id="fx-breath" class="fx"></div>
+    <div id="fx-hurt" class="fx"></div>
+    <div id="fx-flash" class="fx"></div>
+    <div id="fx-burst" class="fx"></div>
+    <div id="hud" hidden>
+      <div id="xpbar"><div id="xpfill"></div></div>
+      <div id="top">
+        <div id="hardpoints"></div>
+        <div id="centre"><span id="level">L1</span><span id="timer">0:00</span></div>
+        <div id="kills">0</div>
+      </div>
+      <div id="bottom">
+        <div id="surge"></div>
+        <div id="hullbar"><div id="hullfill"></div><span id="hulltext"></span></div>
+      </div>
+    </div>
+    <div id="cards" class="overlay" hidden></div>
+    <div id="pause" class="overlay" hidden>
+      <div class="panel">
+        <h2>Paused</h2>
+        <p><kbd>Esc</kbd> resume &nbsp; <kbd>Backspace</kbd> restart run</p>
+      </div>
+    </div>
+    <div id="over" class="overlay" hidden><div class="panel" id="over-panel"></div></div>
+    <div id="title" class="overlay">
+      <div class="panel">
+        <h1>NEON SWARM</h1>
+        <p class="sub">Build the chain reaction.</p>
+        <p><kbd>W</kbd><kbd>A</kbd><kbd>S</kbd><kbd>D</kbd> move &nbsp; <kbd>1</kbd><kbd>2</kbd><kbd>3</kbd> pick &nbsp; <kbd>R</kbd> reroll &nbsp; <kbd>Esc</kbd> pause</p>
+        <p class="go">Press any key to deploy VANGUARD</p>
+      </div>
+    </div>
+    <div id="dev-readout" hidden></div>
+    <div id="dev-panel" hidden></div>
+    <script type="module" src="/src/main.ts"></script>
+  </body>
+</html>
