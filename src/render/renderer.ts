@@ -15,8 +15,6 @@ const C = TUNING.camera;
 const MODEL_SCALE = 1.35;
 /** Mech speed (u/s) at which the run cycle plays at its authored rate. */
 const RUN_ANIM_SPEED = 5;
-/** Self-illumination from the model's colour texture. */
-const MODEL_GLOW = 0.9;
 const ARC_SUBDIV = 4;
 const MAX_ARC_SEGS = 8000;
 
@@ -115,7 +113,7 @@ export class Renderer {
   private mechBody: THREE.Mesh;
   private mechYaw = 0;
   private placeholder = new THREE.Group();
-  private modelMats: THREE.MeshStandardMaterial[] = [];
+  private model: THREE.Object3D | null = null;
   private mixer: THREE.AnimationMixer | null = null;
   private run: THREE.AnimationAction | null = null;
   private idle: THREE.AnimationAction | null = null;
@@ -239,19 +237,7 @@ export class Renderer {
         const model = gltf.scene;
         model.scale.setScalar(MODEL_SCALE);
         model.traverse((o) => {
-          const mesh = o as THREE.Mesh;
-          if (mesh.isMesh) {
-            mesh.frustumCulled = false;
-            const mat = mesh.material as THREE.MeshStandardMaterial;
-            // No environment map in this scene: keep metals from rendering black, and let the
-            // model's own colours glow a little so the player stays the brightest thing on screen
-            mat.metalness = Math.min(mat.metalness, 0.4);
-            mat.emissiveMap = mat.map;
-            mat.emissive.setHex(0xffffff);
-            mat.emissiveIntensity = MODEL_GLOW;
-            mat.needsUpdate = true;
-            this.modelMats.push(mat);
-          }
+          if ((o as THREE.Mesh).isMesh) o.frustumCulled = false;
         });
         this.mixer = new THREE.AnimationMixer(model);
         const clip = (n: string) => gltf.animations.find((a) => a.name === n);
@@ -262,6 +248,7 @@ export class Renderer {
         this.idle?.play();
         this.placeholder.visible = false;
         this.mech.add(model);
+        this.model = model;
       },
       undefined,
       () => console.warn('Neon Swarm: player model failed to load; using the stand-in frame'),
@@ -350,10 +337,7 @@ export class Renderer {
     this.mech.visible = !w.dead || w.tick % 6 < 3;
     const flashing = w.invuln > 0 && Math.floor(realTime * 20) % 2 === 0;
     (this.mechBody.material as THREE.MeshLambertMaterial).emissive.setHex(flashing ? 0xff3355 : 0x000000);
-    for (const m of this.modelMats) {
-      m.emissive.setHex(flashing ? 0xff3355 : 0xffffff);
-      m.emissiveIntensity = flashing ? 1.5 : MODEL_GLOW;
-    }
+    if (this.model) this.model.visible = !flashing;
     this.animateModel(w);
 
     // Enemies
