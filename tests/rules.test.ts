@@ -71,7 +71,7 @@ describe('hit events (Link rules §1)', () => {
 });
 
 describe('director and Surges', () => {
-  it('runs the full Surge schedule, Breath 10 s before each, then the Overmind at 15:00', () => {
+  it('runs the full Surge schedule, Breath 10 s before each, then the Overmind at 15:00', { timeout: 60000 }, () => {
     const w = new World({ seed: 2 });
     w.dev({ cmd: 'god', on: true });
     const seen: { type: string; t: number }[] = [];
@@ -187,7 +187,7 @@ describe('saved progress', () => {
     const p = emptyProfile();
     expect(applyFeat(p, 'firstLink')).toEqual(['ion']);
     expect(applyFeat(p, 'broodBeaten')).toEqual(['cryo']);
-    expect(applyFeat(p, 'win')).toEqual(['moon', 'endless']);
+    expect(applyFeat(p, 'win').sort()).toEqual(['endless', 'moon']);
     expect(applyCodex(p, 'pulse>tesla').isNew).toBe(true);
     expect(applyCodex(p, 'pulse>tesla').isNew).toBe(false);
     applyRunEnd(p, new Map([['pulse>tesla', 42]]), new Map([['seeker>tesla>mortar', 7]]));

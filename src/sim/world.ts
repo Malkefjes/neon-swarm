@@ -3,7 +3,7 @@
 // Weapons, the director and the bosses live in their own modules and operate on
 // the World's public state.
 import { len2 } from './math';
-import { TUNING, type EnemyKind, type StatId, type UnitEnemy, type WeaponId } from '../tuning';
+import { TUNING, type BiomeId, type EnemyKind, type FrameId, type StatId, type UnitEnemy, type WeaponId } from '../tuning';
 import {
   addWeapon,
   allWeapons,
@@ -25,18 +25,29 @@ import { FORESHORTEN, RIGHT, UP, inputToGround } from './view';
 import type {
   Arc,
   Bolt,
+  Cone,
   Core,
+  Crystal,
+  DelayedTrigger,
   Enemy,
+  Freeze,
   Hazard,
+  HitPoint,
+  Mine,
   Missile,
+  Obstacle,
   OrbitBlade,
   Pickup,
   PickupKind,
+  Rail,
   Ring,
   Shell,
+  Singularity,
   Src,
+  Vent,
   Zone,
 } from './types';
+import { buildLayout, pushOut, recentre, updateCrystals, updateVents } from './maps';
 import { endOldestContinuous, fireHeads, fireTrigger, updateEffects } from './weapons';
 import { devBoss, devElite, devSurge, direct, onSurgeUnitKilled, spawnPoint } from './director';
 import { onBossKilled, updateBosses } from './bosses';
@@ -64,6 +75,9 @@ export type WorldEvent =
   | { type: 'bossDown'; kind: 'brood' | 'overmind' }
   | { type: 'pickup'; kind: PickupKind }
   | { type: 'feat'; feat: Feat }
+  | { type: 'kill'; x: number; z: number; kind: EnemyKind; r: number; frozen: boolean }
+  | { type: 'shatter'; x: number; z: number }
+  | { type: 'boom'; x: number; z: number; r: number }
   | { type: 'death' }
   | { type: 'win' };
 
@@ -96,14 +110,24 @@ export type SurgePhase = 'build' | 'breath' | 'surge' | 'boss';
 
 export interface WorldOptions {
   seed: number;
-  /** Weapons that can appear in drafts (unlocked and implemented). Defaults to the starting 6. */
+  /** Weapons that can appear in drafts (unlocked). Defaults to the starting 6. */
   weapons?: readonly WeaponId[];
+  frame?: FrameId;
+  biome?: BiomeId;
+  threat?: number;
+  endless?: boolean;
 }
 
 export class World {
   readonly seed: number;
   readonly rng: Rng;
   readonly weaponPool: readonly WeaponId[];
+  readonly frame: FrameId;
+  readonly biome: BiomeId;
+  readonly threat: number;
+  readonly endless: boolean;
+  readonly triggerLevel: number;
+  readonly triggerRepeats: number;
 
   tick = 0;
   time = 0; // game seconds (slows during slow-mo)
@@ -117,6 +141,8 @@ export class World {
   vz = 0;
   hull: number;
   invuln = 0;
+  faceX = 0; // last movement direction (Railgun fires along it)
+  faceZ = -1;
   dead = false;
   won = false;
   runOver = false;
@@ -170,6 +196,26 @@ export class World {
   cores: Core[] = [];
   pickups: Pickup[] = [];
   hazards: Hazard[] = [];
+  mines: Mine[] = [];
+  rails: Rail[] = [];
+  singularities: Singularity[] = [];
+  cones: Cone[] = [];
+  freezes: Freeze[] = [];
+  delayed: DelayedTrigger[] = [];
+  cryoCycle = 0;
+  cryoNextTick = 0;
+  cryoRolls = new Map<number, number>();
+  obstacles: Obstacle[] = [];
+  vents: Vent[] = [];
+  crystals: Crystal[] = [];
+  shiftX = 0; // Moon: total world shift so far (for rendering the floor)
+  shiftZ = 0;
+  overmindKilled = false;
+  /** Frozen enemies take +50% damage once a Cryo Emitter reaches L3 (updated as weapons level). */
+  get frozenBonus(): boolean {
+    const c = findWeapon(this.build, 'cryo');
+    return !!c && c.level >= T.weapons.cryo.frozenBonusLevel;
+  }
   triggeredInstant: number[] = []; // expiry times of live triggered instant effects (Tesla chains, Arc rings)
   enemyPool: Enemy[] = [];
   nextEnemyId = 1;
@@ -177,8 +223,10 @@ export class World {
   pushX = new Float32Array(2048);
   pushZ = new Float32Array(2048);
 
-  // Arena: a square, which becomes a closing circle in the Overmind's last phase
+  // Arena: a square (Station) or wrap-around (Moon); a closing circle in the Overmind's last phase
   arenaRadius = Infinity;
+  arenaCX = 0;
+  arenaCZ = 0;
 
   // Director
   budget = 0;
@@ -221,13 +269,25 @@ export class World {
     this.seed = opts.seed >>> 0;
     this.rng = new Rng(this.seed);
     this.weaponPool = opts.weapons ?? T.startingWeapons;
-    const f = T.frames.vanguard;
-    this.build = makeBuild(f.hardpoints, f.hull, f.speed);
+    this.frame = opts.frame ?? 'vanguard';
+    this.biome = opts.biome ?? 'station';
+    this.threat = Math.max(0, Math.min(T.threat.max, opts.threat ?? 0));
+    this.endless = !!opts.endless;
+    const f = T.frames[this.frame];
+    const hull = this.threat >= 10 ? Math.min(f.hull, T.threat.maxHull) : f.hull;
+    this.build = makeBuild(f.hardpoints, hull, f.speed);
     this.weaponCap = f.weaponCap;
     this.linkLevel = f.linkLevel;
-    this.hull = f.hull;
+    this.triggerLevel = f.triggerLevel;
+    this.triggerRepeats = f.triggerRepeats;
+    this.hull = hull;
     addWeapon(this.build, f.startWeapon);
-    this.grid = new Grid(T.arena.halfSize, T.crowd.cellSize, 2048);
+    this.grid = new Grid(T.arena.halfSize + 25, T.crowd.cellSize, 2048);
+    const layout = buildLayout(this.biome);
+    this.obstacles = layout.obstacles;
+    this.vents = layout.vents;
+    this.crystals = layout.crystals;
+    this.nextElite = T.elite.from;
   }
 
   // ---------------------------------------------------------------- queries
@@ -253,6 +313,11 @@ export class World {
     const s = T.surge.schedule[this.surgeIndex];
     if (s) return { in: Math.max(0, s.time - this.time), boss: s.formation === 'brood' ? 'BROOD MOTHER' : null };
     if (!this.overmindSpawned) return { in: Math.max(0, T.surge.overmindAt - this.time), boss: 'OVERMIND' };
+    if (this.endless) {
+      const E = T.endless;
+      const k = Math.max(0, Math.ceil((this.time - E.firstAfter) / E.surgeEvery));
+      return { in: Math.max(0, E.firstAfter + k * E.surgeEvery - this.time), boss: null };
+    }
     return null;
   }
 
@@ -262,6 +327,8 @@ export class World {
     for (const m of this.missiles) if (m.src.triggered) n++;
     for (const s of this.shells) if (s.src.triggered) n++;
     for (const z of this.zones) if (z.src.triggered) n++;
+    for (const m of this.mines) if (m.src.triggered) n++;
+    for (const g of this.singularities) if (g.src.triggered) n++;
     n += this.orbitBlades.length;
     return n;
   }
@@ -371,6 +438,7 @@ export class World {
         this.moveMech(mx, my, dt);
       }
       this.moveCamera(dt);
+      recentre(this);
       direct(this, dt);
       this.moveEnemies(dt);
       updateBosses(this, dt);
@@ -381,6 +449,7 @@ export class World {
       this.compactEnemies();
       this.updateCores(dt);
       this.updatePickups(dt);
+      updateCrystals(this, dt);
       this.time += dt;
     }
     this.tick++;
@@ -414,15 +483,19 @@ export class World {
 
   /** Clamp a point of radius r inside the arena (square, or the closing circle). */
   clampToArena(p: { x: number; z: number }, r: number): void {
-    const lim = T.arena.halfSize - r;
-    p.x = clampAbs(p.x, lim);
-    p.z = clampAbs(p.z, lim);
+    if (this.biome === 'station') {
+      const lim = T.arena.halfSize - r;
+      p.x = clampAbs(p.x, lim);
+      p.z = clampAbs(p.z, lim);
+    }
     if (this.arenaRadius < Infinity) {
-      const d = len2(p.x, p.z);
+      const dx = p.x - this.arenaCX;
+      const dz = p.z - this.arenaCZ;
+      const d = len2(dx, dz);
       const max = Math.max(0.1, this.arenaRadius - r);
       if (d > max) {
-        p.x *= max / d;
-        p.z *= max / d;
+        p.x = this.arenaCX + (dx * max) / d;
+        p.z = this.arenaCZ + (dz * max) / d;
       }
     }
   }
@@ -453,7 +526,15 @@ export class World {
     }
     this.x += this.vx * dt;
     this.z += this.vz * dt;
+    if (mx || my) {
+      const v = len2(this.vx, this.vz);
+      if (v > 0.1) {
+        this.faceX = this.vx / v;
+        this.faceZ = this.vz / v;
+      }
+    }
     this.clampToArena(this, T.mech.radius);
+    pushOut(this, this, T.mech.radius);
     if (this.invuln > 0) this.invuln -= dt;
   }
 
@@ -549,6 +630,11 @@ export class World {
       marchLeft: 0,
       gate: new Float64Array(MAX_PART_SLOTS),
       boss: null,
+      slowUntil: -1,
+      frozenUntil: -1,
+      chill: 0,
+      chillSeen: -99,
+      spitT: 0,
     };
     const tMin = this.tMin;
     e.id = this.nextEnemyId++;
@@ -566,13 +652,20 @@ export class World {
     e.zig = 1;
     e.marchLeft = 0;
     e.boss = null;
+    e.slowUntil = -1;
+    e.frozenUntil = -1;
+    e.chill = 0;
+    e.chillSeen = -99;
+    e.spitT = T.enemies.spitter.spitEvery * 0.5;
     e.gate.fill(-1);
+    const threatHp = this.threat >= 6 ? 1 + T.threat.hp : 1;
+    const threatSpeed = this.threat >= 1 ? 1 + T.threat.speed : 1;
     if (kind === 'brood' || kind === 'overmind') {
       // Bosses don't scale with time.
       const b = T.bosses[kind];
       e.r = b.radius;
-      e.maxHp = e.hp = b.hp;
-      e.speed = kind === 'brood' ? T.bosses.brood.speed : 0;
+      e.maxHp = e.hp = b.hp * threatHp;
+      e.speed = kind === 'brood' ? T.bosses.brood.speed * threatSpeed : 0;
       e.damage = b.contactDamage;
       e.xp = 0;
       e.blocks = true;
@@ -595,11 +688,11 @@ export class World {
     } else {
       const def = T.enemies[kind as UnitEnemy];
       const el = T.elite;
-      const hp = def.hp * hpMult(tMin) * this.benchHpMult * (elite ? el.hp : 1);
+      const hp = def.hp * hpMult(tMin) * this.benchHpMult * (elite ? el.hp : 1) * threatHp;
       e.r = def.radius * (elite ? el.size : 1);
       e.maxHp = e.hp = hp;
       e.shield = elite === 2 ? hp * el.shield : 0;
-      e.speed = def.speed * (elite === 1 ? el.hastedSpeed : el.speed);
+      e.speed = def.speed * (elite === 1 ? el.hastedSpeed : el.speed) * threatSpeed;
       e.damage = def.damage * damageMult(tMin) * (elite ? el.damage : 1);
       e.xp = elite ? el.xp : def.xp;
       e.blocks = kind === 'carapace';
@@ -628,15 +721,41 @@ export class World {
     const dH = T.director.despawnScreens * T.camera.viewHeight;
     const sk = T.enemies.skitter;
     const zigA = (sk.zigAngleDeg * Math.PI) / 180;
+    const sp = T.enemies.spitter;
     for (let i = 0; i < n; i++) {
       const e = es[i];
       if (e.boss) continue; // bosses steer themselves
+      if (e.frozenUntil > this.time) continue;
+      const speed = e.speed * (e.slowUntil > this.time ? 1 - T.weapons.cryo.slow : 1);
       let dx: number;
       let dz: number;
+      if (e.kind === 'spitter' && e.marchLeft <= 0) {
+        // Holds at range and lobs globs at the mech
+        dx = this.x - e.x;
+        dz = this.z - e.z;
+        const d = len2(dx, dz);
+        if (d < 1e-6) continue;
+        dx /= d;
+        dz /= d;
+        e.fx = dx;
+        e.fz = dz;
+        if (d <= sp.hold + e.r) {
+          e.spitT -= dt;
+          if (e.spitT <= 0 && !this.dead) {
+            e.spitT = sp.spitEvery;
+            const gs = sp.globSpeed * (this.threat >= 5 ? 1 + T.threat.globSpeed : 1);
+            this.hazards.push({ kind: 'spit', x: e.x, z: e.z, px: e.x, pz: e.z, dx, dz, speed: gs, r: 0.3, life: sp.globRange / gs, damage: sp.globDamage * damageMult(this.tMin), travelled: 0, range: sp.globRange, alive: true });
+          }
+          continue;
+        }
+        e.x += dx * speed * dt;
+        e.z += dz * speed * dt;
+        continue;
+      }
       if (e.marchLeft > 0) {
         dx = e.marchX;
         dz = e.marchZ;
-        e.marchLeft -= e.speed * dt;
+        e.marchLeft -= speed * dt;
       } else {
         dx = this.x - e.x;
         dz = this.z - e.z;
@@ -660,8 +779,8 @@ export class World {
       }
       e.fx = dx;
       e.fz = dz;
-      e.x += dx * e.speed * dt;
-      e.z += dz * e.speed * dt;
+      e.x += dx * speed * dt;
+      e.z += dz * speed * dt;
       // Too far away: respawn near the player (keeps its Surge membership). Elites are kept.
       if (!e.elite) {
         const ox = e.x - this.camX;
@@ -761,6 +880,8 @@ export class World {
       e.z += pz[i];
       this.clampToArena(e, e.r);
     }
+    updateVents(this, dt);
+    if (this.obstacles.length) for (const e of es) if (!e.boss || e.kind === 'brood') pushOut(this, e, e.r);
     this.rebuildGrid();
   }
 
@@ -801,6 +922,7 @@ export class World {
         this.x -= (dx / d) * out;
         this.z -= (dz / d) * out;
         this.clampToArena(this, mr);
+        pushOut(this, this, mr);
       } else {
         e.x += (dx / d) * out;
         e.z += (dz / d) * out;
@@ -822,6 +944,7 @@ export class World {
       const d = len2(dx, dz);
       if (d > 1e-5 && (dx * e.fx + dz * e.fz) / d >= Math.cos(((c.frontArcDeg / 2) * Math.PI) / 180)) amount *= c.frontMult;
     }
+    if (e.frozenUntil > this.time && this.frozenBonus) amount *= 1 + T.weapons.cryo.frozenBonus;
     e.lastHit = this.tick;
     let dealt = amount;
     if (e.shield > 0) {
@@ -844,6 +967,22 @@ export class World {
   private kill(e: Enemy, src: Src | null): void {
     e.alive = false;
     this.kills++;
+    const frozen = e.frozenUntil > this.time;
+    this.events.push({ type: 'kill', x: e.x, z: e.z, kind: e.kind, r: e.r, frozen });
+    if (frozen) {
+      // Cryo L5: frozen enemies shatter on death
+      const cryo = findWeapon(this.build, 'cryo');
+      const cryoChain = cryo && this.build.hardpoints.find((c) => c && c.parts.some((p) => p.weapon === cryo));
+      if (cryo && cryoChain && T.weapons.cryo.levels[cryo.level]!.shatter) {
+        const S = T.weapons.cryo.shatter;
+        const part = cryoChain.parts.findIndex((p) => p.weapon === cryo);
+        const ssrc: Src = { chain: cryoChain, part, weapon: 'cryo', triggered: part > 0, pair: null };
+        for (const o of this.inDisc(e.x, e.z, S.radius * this.build.stats.area)) {
+          if (o !== e) this.damage(o, S.damage * this.build.stats.power, ssrc, e.x, e.z);
+        }
+        this.events.push({ type: 'boom', x: e.x, z: e.z, r: S.radius });
+      }
+    }
     this.killTimes.push(this.time);
     if (src) {
       const key = chainKey(src.chain);
@@ -862,7 +1001,8 @@ export class World {
       this.events.push({ type: 'eliteDown' });
     } else {
       const P = T.pickups;
-      if (this.time - this.lastRepair >= P.repairCooldown && this.rng.chance(P.repairChance)) {
+      const repairChance = P.repairChance * (this.threat >= 4 ? T.threat.repairMult : 1);
+      if (this.time - this.lastRepair >= P.repairCooldown && this.rng.chance(repairChance)) {
         this.lastRepair = this.time;
         this.pickups.push({ kind: 'repair', x: e.x, z: e.z, state: 0 });
       } else if (this.time - this.lastMagnet >= P.magnetCooldown && this.rng.chance(P.magnetChance)) {
@@ -915,11 +1055,17 @@ export class World {
     }
     let capped = this.triggeredEffects >= T.links.maxTriggeredEffects;
     if (capped && endOldestContinuous(this)) capped = false;
-    const grant = takeTrigger(p, capped);
+    // COLOSSUS: every trigger fires twice and counts twice against the limiter
+    const repeats = this.triggerRepeats;
+    const grant = takeTrigger(p, capped, repeats);
     if (!grant) return;
     const power = triggerMult(chain.level) * (1 + grant.power) * this.build.stats.power;
     const size = 1 + grant.size;
-    fireTrigger(this, chain, next, e, power, size, pair);
+    const from: HitPoint = { x: e.x, z: e.z, id: e.id };
+    fireTrigger(this, chain, next, from, power, size, pair);
+    for (let r = 1; r < repeats; r++) {
+      this.delayed.push({ at: this.time + T.triggerRepeatDelay * r, chainKey: chainKey(chain), part: next, from: { ...from }, power, size, pair });
+    }
   }
 
   /** An area pulse: rolls for up to 3 random enemies it hit. */

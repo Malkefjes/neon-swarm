@@ -2,27 +2,27 @@ import { describe, expect, it } from 'vitest';
 import { TUNING, type WeaponId } from '../src/tuning';
 import { World } from '../src/sim/world';
 
-const WEAPONS = TUNING.startingWeapons;
+const WEAPONS = TUNING.codexOrder;
 const PAIRS: [WeaponId, WeaponId][] = [];
 for (const h of WEAPONS) for (const t of WEAPONS) if (h !== t) PAIRS.push([h, t]);
 
-/** Tough, still enemies scattered around the mech. */
+/** Tough, still enemies scattered around the mech (some close enough to set off mines). */
 function arena(w: World): void {
-  for (let i = 0; i < 48; i++) {
+  for (let i = 0; i < 56; i++) {
     const a = i * 2.399;
-    const r = 1.4 + (i % 8) * 1.1;
+    const r = 1.2 + (i % 8) * 1.1;
     const e = w.spawnEnemy('mite', Math.cos(a) * r, Math.sin(a) * r, 0)!;
     e.hp = e.maxHp = 1e9;
     e.speed = 0;
   }
 }
 
-describe('all 30 ordered pairs of the 6 starting weapons', () => {
-  it('there are 30 ordered pairs', () => expect(PAIRS).toHaveLength(30));
+describe('all 90 ordered pairs of the 10 weapons', () => {
+  it('there are 90 ordered pairs', () => expect(PAIRS).toHaveLength(90));
 
   for (const [h, t] of PAIRS) {
     it(`${h} -> ${t}: head hits fire the tail's trigger form; the tail never fires on its own`, () => {
-      const w = new World({ seed: 3 });
+      const w = new World({ seed: 3, weapons: WEAPONS });
       w.dev({ cmd: 'director', on: false });
       w.dev({ cmd: 'god', on: true });
       w.dev({ cmd: 'link', chain: [h, t], chainLevel: 5 });
@@ -31,22 +31,28 @@ describe('all 30 ordered pairs of the 6 starting weapons', () => {
       const chain = w.build.hardpoints.find((c) => c && c.parts.length === 2)!;
       expect(chain.parts.map((p) => p.weapon.id)).toEqual([h, t]);
       let soloTail = 0;
+      let froze = 0;
       for (let i = 0; i < 6 * 60; i++) {
         w.step(0, 0);
-        for (const list of [w.bolts, w.missiles, w.shells, w.zones]) {
+        for (const list of [w.bolts, w.missiles, w.shells, w.zones, w.mines, w.singularities]) {
           for (const fx of list as { src: { weapon: WeaponId; triggered: boolean } }[]) {
             if (fx.src.weapon === t && !fx.src.triggered) soloTail++;
           }
         }
         for (const a of w.arcs) if (a.weapon === t && !a.triggered) soloTail++;
         for (const r of w.rings) if (r.weapon === t && !r.triggered) soloTail++;
+        for (const r of w.rails) if (!r.triggered && t === 'rail') soloTail++;
         if (t === 'blades') soloTail += w.soloBlades.length;
+        if (t === 'cryo') soloTail += w.cones.length;
+        if (t === 'cryo') froze += w.freezes.length;
       }
       expect(soloTail).toBe(0);
       expect(w.codex.has(`${h}>${t}`)).toBe(true);
       expect(chain.parts[0].damage).toBeGreaterThan(0);
       expect(chain.parts[1].fired).toBeGreaterThan(0);
-      expect(chain.parts[1].damage).toBeGreaterThan(0);
+      // The Cryo trigger form freezes rather than damages
+      if (t === 'cryo') expect(froze).toBeGreaterThan(0);
+      else expect(chain.parts[1].damage).toBeGreaterThan(0);
       // The tail rolls for nothing: no reverse pair, nothing else logged
       expect([...w.codex]).toEqual([`${h}>${t}`]);
     });

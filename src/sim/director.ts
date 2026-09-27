@@ -9,12 +9,11 @@ import type { World } from './world';
 const T = TUNING;
 const SU = T.surge;
 
-/** Unit kinds the current milestone implements. Spitters (milestone 3) fall back to the others. */
 const IMPLEMENTED: Record<UnitKind, UnitEnemy | null> = {
   mite: 'mite',
   skitter: 'skitter',
   carapace: 'carapace',
-  spitter: null,
+  spitter: 'spitter',
   splitter: 'splitter',
 };
 
@@ -33,9 +32,9 @@ export function direct(w: World, dt: number): void {
 
   schedule(w);
 
-  // Forced elites
+  // Forced elites (Threat 2: every 45 s)
   if (w.time >= w.nextElite) {
-    w.nextElite += T.elite.every;
+    w.nextElite += w.threat >= 2 ? T.threat.eliteEvery : T.elite.every;
     spawnElite(w);
   }
 
@@ -56,14 +55,16 @@ export function direct(w: World, dt: number): void {
   }
 }
 
-function currentMix(time: number): Record<UnitKind, number> {
+function currentMix(w: World): Record<UnitKind, number> {
   let mix = T.director.mix[0].weights;
-  for (const m of T.director.mix) if (time >= m.from) mix = m.weights;
+  for (const m of T.director.mix) if (w.time >= m.from) mix = m.weights;
+  // Threat 5: Spitters from 0:00
+  if (w.threat >= 5 && mix.spitter === 0) mix = { ...mix, spitter: T.threat.spitterWeight };
   return mix;
 }
 
 /** A unit kind drawn from the current window's weights (unimplemented kinds dropped). */
-export function pickUnit(w: World, weights: Partial<Record<UnitKind, number>> = currentMix(w.time)): UnitEnemy {
+export function pickUnit(w: World, weights: Partial<Record<UnitKind, number>> = currentMix(w)): UnitEnemy {
   let total = 0;
   for (const k of Object.keys(weights) as UnitKind[]) if (IMPLEMENTED[k]) total += weights[k] ?? 0;
   if (total <= 0) return 'mite';
@@ -117,13 +118,38 @@ function schedule(w: World): void {
       if (w.surgePhase === 'build') w.surgePhase = 'breath';
       w.events.push({ type: 'breath', boss: true });
     }
-    if (w.time >= SU.overmindAt) {
-      w.overmindSpawned = true;
-      w.surgePhase = 'boss';
-      const e = w.spawnEnemy('overmind', 0, 0, 0);
-      if (e) w.events.push({ type: 'boss', kind: 'overmind' });
-    }
+    if (w.time >= SU.overmindAt) spawnOvermind(w);
+    return;
   }
+  // Endless: Surges keep coming every 90 s, cycling the formations
+  if (w.endless) {
+    const E = T.endless;
+    const k = Math.floor((w.time - E.firstAfter) / E.surgeEvery);
+    if (k < 0) return;
+    const at = E.firstAfter + k * E.surgeEvery;
+    const n = SU.schedule.length + 1 + k;
+    if (w.surgeCount >= n) return;
+    if (w.surgePhase !== 'surge' && w.surgePhase !== 'breath' && w.time >= at - SU.breath && w.time < at) {
+      w.surgePhase = 'breath';
+      w.events.push({ type: 'breath', boss: false });
+    }
+    if (w.time >= at && w.surgePhase !== 'surge') startSurge(w, E.formations[k % E.formations.length], n);
+  }
+}
+
+/** The Overmind: the arena centre on the Station; 20 u from the mech on the wrap-around Moon. */
+function spawnOvermind(w: World): void {
+  w.overmindSpawned = true;
+  w.surgePhase = 'boss';
+  let x = 0;
+  let z = 0;
+  if (w.biome === 'moon') {
+    const a = w.rng.next() * Math.PI * 2;
+    x = w.x + Math.cos(a) * 20;
+    z = w.z + Math.sin(a) * 20;
+  }
+  const e = w.spawnEnemy('overmind', x, z, 0);
+  if (e) w.events.push({ type: 'boss', kind: 'overmind' });
 }
 
 function killsLast60(w: World): number {
@@ -142,13 +168,20 @@ export function startSurge(w: World, formation: Formation, n: number): void {
     if (e) w.events.push({ type: 'boss', kind: 'brood' });
     return;
   }
-  const size = Math.round(surgeSize(n, killsLast60(w), w.tMin) * w.surgeSizeMult);
+  const size = Math.round(surgeSize(n, killsLast60(w), w.tMin) * w.surgeSizeMult * (w.threat >= 3 ? 1 + T.threat.surgeSize : 1));
   w.surgeId++;
   w.surgePhase = 'surge';
   w.surgeKilled = 0;
   w.surgeStart = w.time;
   const room = T.sim.maxEnemies - w.enemies.length;
   const units = formationUnits(w, formation, Math.min(size, room));
+  // Threat 9: every Surge includes Carapaces
+  if (w.threat >= 9) {
+    const every = Math.round(1 / T.threat.surgeCarapace);
+    units.forEach((u, i) => {
+      if (i % every === every - 1) u.kind = 'carapace';
+    });
+  }
   for (const u of units) {
     const p = { x: u.x, z: u.z };
     w.clampToArena(p, 1);
@@ -176,7 +209,7 @@ export function onSurgeUnitKilled(w: World, e: Enemy): void {
   if (t < 8) w.addFeat('fastSurge');
   w.surgeId++; // survivors keep an id that no longer counts
   w.pullAllCores();
-  if (!w.dead) w.hull = Math.min(w.build.maxHull, w.hull + T.overflow.heal);
+  if (!w.dead && w.threat < 7) w.hull = Math.min(w.build.maxHull, w.hull + T.overflow.heal); // Threat 7: no heal
   w.overflowTicks = Math.round(T.overflow.slowTime * T.sim.tickRate);
   w.events.push({ type: 'overflow', n: w.surgeCount, breakTime: t });
 }
@@ -190,12 +223,7 @@ export function devSurge(w: World, n?: number): void {
 
 export function devBoss(w: World, kind: 'brood' | 'overmind'): void {
   if (kind === 'brood') startSurge(w, 'brood', 5);
-  else if (!w.bosses.some((b) => b.kind === 'overmind')) {
-    w.overmindSpawned = true;
-    w.surgePhase = 'boss';
-    const e = w.spawnEnemy('overmind', 0, 0, 0);
-    if (e) w.events.push({ type: 'boss', kind: 'overmind' });
-  }
+  else if (!w.bosses.some((b) => b.kind === 'overmind')) spawnOvermind(w);
 }
 
 interface Placement {
@@ -236,10 +264,12 @@ function formationUnits(w: World, f: Formation, size: number): Placement[] {
       break;
     }
     case 'mixed7': {
-      // Carapace front line, Spitters behind (milestone 3: Mites stand in), Mite tide
+      // Carapace front line, Spitters behind, Mite tide
       const front = Math.round(size * 0.15);
+      const spitters = Math.round(size * 0.15);
       wall(w, out, front, dir, { carapace: 1 }, 2);
-      tide(w, out, size - front, dir, SU.tideDistance + 5, { mite: 80, spitter: 20 });
+      wall(w, out, spitters, dir, { spitter: 1 }, 1.6, 3);
+      tide(w, out, size - front - spitters, dir, SU.tideDistance + 7, { mite: 1 });
       break;
     }
     case 'doubleRing': {
@@ -281,7 +311,7 @@ function ring(w: World, out: Placement[], count: number, startRadius: number, mi
 }
 
 /** A thick line starting off-screen on the -dir side, sweeping along dir. */
-function wall(w: World, out: Placement[], count: number, dir: { x: number; z: number }, mix: Mix, spacingMult = 1): void {
+function wall(w: World, out: Placement[], count: number, dir: { x: number; z: number }, mix: Mix, spacingMult = 1, extraBack = 0): void {
   const spacing = SU.wallSpacing * spacingMult;
   const perRow = Math.max(4, Math.floor(SU.wallLength / spacing));
   const px = -dir.z;
@@ -290,7 +320,7 @@ function wall(w: World, out: Placement[], count: number, dir: { x: number; z: nu
   let placed = 0;
   while (placed < count) {
     const n = Math.min(perRow, count - placed);
-    const back = SU.wallDistance + row * spacing;
+    const back = SU.wallDistance + extraBack + row * spacing;
     for (let i = 0; i < n; i++) {
       const s = (i - (n - 1) / 2) * spacing;
       out.push({

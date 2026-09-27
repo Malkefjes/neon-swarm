@@ -84,11 +84,14 @@ function brood(w: World, b: Enemy, dt: number): void {
   }
   if (s.burstT <= 0) {
     s.burstT = BM.burstEvery;
+    // Threat 8: Brood Bursts include Splitters
+    const splitters = w.threat >= 8 ? T.threat.broodSplitters : 0;
+    const every = splitters ? Math.floor(BM.burstMites / splitters) : 0;
     for (let i = 0; i < BM.burstMites; i++) {
       const a = (i / BM.burstMites) * Math.PI * 2;
       const p = { x: b.x + Math.cos(a) * BM.burstRadius, z: b.z + Math.sin(a) * BM.burstRadius };
       w.clampToArena(p, 0.5);
-      w.spawnEnemy('mite', p.x, p.z, 0);
+      w.spawnEnemy(every && i % every === 0 ? 'splitter' : 'mite', p.x, p.z, 0);
     }
   }
   w.clampToArena(b, b.r);
@@ -105,9 +108,10 @@ function startTelegraph(w: World, b: Enemy): void {
 }
 
 /** The Overmind's beams as segments from its centre. */
-export function overmindBeams(b: Enemy): { x1: number; z1: number; x2: number; z2: number }[] {
+export function overmindBeams(b: Enemy, threat = 0): { x1: number; z1: number; x2: number; z2: number }[] {
   const s = b.boss!;
-  const n = s.phase >= 3 ? 4 : 2;
+  // Threat 8: the Overmind fires 5 beams
+  const n = threat >= 8 ? T.threat.overmindBeams : s.phase >= 3 ? 4 : 2;
   const out = [];
   for (let i = 0; i < n; i++) {
     const a = s.beamAngle + (i / n) * Math.PI * 2;
@@ -124,7 +128,7 @@ function overmind(w: World, b: Enemy, dt: number): void {
   s.beamAngle += ((OM.beamSpeedDeg * Math.PI) / 180) * (enraged ? 2 : 1) * dt;
   // Beams: 20 damage per touch
   const mr = T.mech.radius;
-  for (const seg of overmindBeams(b)) {
+  for (const seg of overmindBeams(b, w.threat)) {
     if (segDist(w.x, w.z, seg.x1, seg.z1, seg.x2, seg.z2) < OM.beamWidth / 2 + mr) {
       w.hurt(OM.beamDamage, 'beam');
       break;
@@ -159,7 +163,11 @@ function overmind(w: World, b: Enemy, dt: number): void {
     }
   }
   if (s.phase >= 3) {
-    if (w.arenaRadius === Infinity) w.arenaRadius = T.arena.halfSize;
+    if (w.arenaRadius === Infinity) {
+      w.arenaRadius = T.arena.halfSize;
+      w.arenaCX = b.x;
+      w.arenaCZ = b.z;
+    }
     w.arenaRadius = Math.max(OM.collapseMin, w.arenaRadius - OM.collapseSpeed * dt);
   }
 }
@@ -209,7 +217,8 @@ function updateHazards(w: World, dt: number): void {
     h.travelled += step;
     const hitMech = len2(w.x - h.x, w.z - h.z) < h.r + mr;
     if (hitMech) w.hurt(h.damage, h.kind);
-    if (h.kind === 'glob' && (hitMech || h.travelled >= h.range)) {
+    if (h.kind === 'spit' && (hitMech || h.travelled >= h.range)) h.alive = false;
+    else if (h.kind === 'glob' && (hitMech || h.travelled >= h.range)) {
       // An acid glob leaves a puddle where it lands
       h.kind = 'puddle';
       h.r = BM.puddleRadius;
@@ -235,6 +244,13 @@ export function onBossKilled(w: World, b: Enemy): void {
       for (let i = 0; i < 2; i++) w.pickups.push({ kind: 'cache', x: b.x + (i ? 1 : -1), z: b.z, state: 0 });
     }
   } else {
-    w.winRun();
+    w.overmindKilled = true;
+    // Endless: the Overmind's death counts as a win, and the run goes on
+    if (w.endless) {
+      w.addFeat('win');
+      w.events.push({ type: 'win' });
+      w.surgePhase = 'build';
+      w.arenaRadius = Infinity;
+    } else w.winRun();
   }
 }

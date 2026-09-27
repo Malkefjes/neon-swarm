@@ -5,11 +5,12 @@
 //
 // Units: seconds, world units (u), fractions (0.3 = 30%).
 
-/** Weapons implemented so far (milestone 2: the 6 starting weapons). */
-export type WeaponId = 'pulse' | 'arc' | 'tesla' | 'seeker' | 'blades' | 'mortar';
-/** Every launch weapon, for the Codex and unlocks. */
-export type AnyWeaponId = WeaponId | 'cryo' | 'ion' | 'rail' | 'singularity';
-export type UnitEnemy = 'mite' | 'skitter' | 'carapace' | 'splitter';
+/** The 10 launch weapons. */
+export type WeaponId = 'pulse' | 'arc' | 'tesla' | 'seeker' | 'blades' | 'mortar' | 'cryo' | 'ion' | 'rail' | 'singularity';
+export type AnyWeaponId = WeaponId;
+export type FrameId = 'vanguard' | 'spark' | 'colossus';
+export type BiomeId = 'station' | 'moon';
+export type UnitEnemy = 'mite' | 'skitter' | 'carapace' | 'spitter' | 'splitter';
 export type EnemyKind = UnitEnemy | 'brood' | 'overmind';
 export type UnitKind = 'mite' | 'skitter' | 'carapace' | 'spitter' | 'splitter';
 export type StatId = 'hull' | 'speed' | 'power' | 'rate' | 'area' | 'magnet';
@@ -64,9 +65,13 @@ export const TUNING = {
     knockback: 1, // u every touching enemy is pushed back after a hit
   },
 
+  // triggerLevel: the weapon level whose stats trigger forms use. triggerRepeats: effects per successful trigger.
   frames: {
-    vanguard: { name: 'VANGUARD', hull: 100, speed: 5, hardpoints: 4, startWeapon: 'pulse' as WeaponId, weaponCap: 5, linkLevel: 5 },
-  },
+    vanguard: { name: 'VANGUARD', hull: 100, speed: 5, hardpoints: 4, startWeapon: 'pulse' as WeaponId, weaponCap: 5, linkLevel: 5, triggerLevel: 5, triggerRepeats: 1, scale: 1 },
+    spark: { name: 'SPARK', hull: 90, speed: 5.3, hardpoints: 4, startWeapon: 'tesla' as WeaponId, weaponCap: 4, linkLevel: 3, triggerLevel: 4, triggerRepeats: 1, scale: 0.9 },
+    colossus: { name: 'COLOSSUS', hull: 140, speed: 3.5, hardpoints: 3, startWeapon: 'mortar' as WeaponId, weaponCap: 5, linkLevel: 5, triggerLevel: 5, triggerRepeats: 2, scale: 1.25 },
+  } as Record<FrameId, { name: string; hull: number; speed: number; hardpoints: number; startWeapon: WeaponId; weaponCap: number; linkLevel: number; triggerLevel: number; triggerRepeats: number; scale: number }>,
+  triggerRepeatDelay: 0.1, // s between COLOSSUS's two trigger effects
 
   // Hull and Speed bases come from the frame; the rest from here.
   stats: {
@@ -234,14 +239,93 @@ export const TUNING = {
       trigger: { chance: 0.2, radius: 1.5, duration: 2 },
       triggerText: 'a plasma pool',
     },
+    cryo: {
+      tickDamage: 4,
+      tick: 0.25,
+      onTime: 2,
+      offTime: 1,
+      coneDeg: 90,
+      slow: 0.4, // speed lost inside the cone
+      freezeAfter: 1.5, // s inside the cone before freezing
+      freezeFor: 1.5,
+      frozenBonus: 0.5, // frozen enemies take +50% damage once Cryo reaches L3
+      frozenBonusLevel: 3,
+      levels: [
+        null,
+        { range: 4, alwaysOn: false, shatter: false },
+        { range: 5, alwaysOn: false, shatter: false },
+        { range: 5, alwaysOn: false, shatter: false },
+        { range: 5, alwaysOn: true, shatter: false },
+        { range: 5, alwaysOn: true, shatter: true },
+      ],
+      shatter: { damage: 10, radius: 1.5 },
+      levelText: ['', '90° cone, 4 u, slows 40%', 'Cone 5 u', 'Frozen take +50% damage', 'Always on', 'Frozen enemies shatter on death'],
+      trigger: { chance: 0.2, radius: 1.5, freeze: 1 },
+      triggerText: 'a 1 s freeze around the hit',
+    },
+    ion: {
+      damage: 30,
+      blast: 2,
+      armTime: 0.5, // solo mines
+      proximity: 1.1, // u from an enemy's edge that sets a mine off
+      life: 20,
+      scatter: 1.5, // u around the mech a mine lands
+      levels: [
+        null,
+        { maxAlive: 8, damageMult: 1, cooldown: 1.5, chain: false },
+        { maxAlive: 12, damageMult: 1, cooldown: 1.5, chain: false },
+        { maxAlive: 12, damageMult: 1.4, cooldown: 1.5, chain: false },
+        { maxAlive: 12, damageMult: 1.4, cooldown: 1.0, chain: false },
+        { maxAlive: 12, damageMult: 1.4, cooldown: 1.0, chain: true },
+      ],
+      chainRadius: 3,
+      levelText: ['', '30 dmg mines, 2 u blast', 'Max 12 mines', '+40% damage', 'Cooldown 1.0', 'Detonations set off mines within 3 u'],
+      trigger: { chance: 0.2, arm: 0.3 },
+      triggerText: 'a mine at the hit',
+    },
+    rail: {
+      damage: 60,
+      length: 18,
+      acquireRange: 18, // fires only when an enemy is this close
+      beamLife: 0.2,
+      levels: [
+        null,
+        { damageMult: 1, width: 0.6, cooldown: 3.0, rails: 1 },
+        { damageMult: 1.4, width: 0.6, cooldown: 3.0, rails: 1 },
+        { damageMult: 1.4, width: 1.2, cooldown: 3.0, rails: 1 },
+        { damageMult: 1.4, width: 1.2, cooldown: 2.2, rails: 1 },
+        { damageMult: 1.4, width: 1.2, cooldown: 2.2, rails: 3 },
+      ],
+      spreadDeg: 15,
+      levelText: ['', 'Piercing rail, 60 dmg, 18 u', '+40% damage', 'Width 1.2 u', 'Cooldown 2.2', '3 rails in a 15° spread'],
+      trigger: { chance: 0.15, length: 10 },
+      triggerText: 'a 10 u rail',
+    },
+    singularity: {
+      tickDamage: 6,
+      tick: 0.25,
+      pullSpeed: 3.5, // u/s toward the centre
+      acquireRange: 12,
+      levels: [
+        null,
+        { pull: 4, duration: 3, cooldown: 6, collapse: 40, collapseRadius: 2 },
+        { pull: 5, duration: 3, cooldown: 6, collapse: 40, collapseRadius: 2 },
+        { pull: 5, duration: 4, cooldown: 6, collapse: 40, collapseRadius: 2 },
+        { pull: 5, duration: 4, cooldown: 4.5, collapse: 40, collapseRadius: 2 },
+        { pull: 5, duration: 4, cooldown: 4.5, collapse: 120, collapseRadius: 3 },
+      ],
+      levelText: ['', '4 u pull for 3 s, 40 collapse', 'Pull 5 u', 'Lasts 4 s', 'Cooldown 4.5', 'Collapse 120 in 3 u'],
+      trigger: { chance: 0.08, pull: 2, duration: 1.5, collapseScale: 0.5 },
+      triggerText: 'a mini singularity',
+    },
   },
 
   enemies: {
     mite: { hp: 10, speed: 2.6, damage: 5, xp: 2, radius: 0.4, cost: 1 }, // xp 1 -> 2, see DECISIONS.md
     skitter: { hp: 6, speed: 4.5, damage: 4, xp: 1, radius: 0.35, cost: 1, zigEvery: 0.6, zigAngleDeg: 40 },
     carapace: { hp: 80, speed: 1.6, damage: 12, xp: 5, radius: 0.9, cost: 6, frontArcDeg: 90, frontMult: 0.5 },
+    spitter: { hp: 25, speed: 2.2, damage: 6, xp: 2, radius: 0.5, cost: 3, hold: 7, spitEvery: 2.5, globDamage: 8, globSpeed: 5, globRange: 12 },
     splitter: { hp: 30, speed: 2.2, damage: 6, xp: 2, radius: 0.6, cost: 3, splits: 4 },
-    // Spitter arrives in milestone 3; its director weight falls back to the other units.
   },
 
   elite: {
@@ -303,6 +387,59 @@ export const TUNING = {
       collapseSpeed: 0.5, // u/s the arena edge closes in phase 3
       collapseMin: 12,
       enrageAt: 1200, // s (20:00): beam speed doubles
+    },
+  },
+
+  // Threat Levels: each adds its modifier on top of the ones below it.
+  threat: {
+    max: 10,
+    speed: 0.15, // 1: enemies +15% speed
+    eliteEvery: 45, // 2
+    surgeSize: 0.25, // 3
+    repairMult: 0.5, // 4
+    spitterWeight: 15, // 5: Spitters from 0:00 (weight in windows that have none) ...
+    globSpeed: 0.5, // ... globs +50% speed
+    hp: 0.3, // 6: enemy HP +30%, bosses included
+    // 7: breaking a Surge no longer heals
+    broodSplitters: 8, // 8: Brood Bursts include this many Splitters; the Overmind fires 5 beams
+    overmindBeams: 5,
+    surgeCarapace: 0.1, // 9: every Surge includes Carapaces (this share)
+    maxHull: 60, // 10
+  },
+
+  endless: {
+    surgeEvery: 90, // s between Surges after 15:00
+    firstAfter: 990,
+    formations: ['ring', 'wall', 'tide', 'ringCarapace', 'twoWalls', 'mixed7', 'doubleRing', 'mixed9'] as Formation[],
+  },
+
+  maps: {
+    station: {
+      obstacles: 36,
+      boxMin: 3,
+      boxMax: 7,
+      cylMin: 1.5,
+      cylMax: 3,
+      clearRadius: 18, // around the start point
+      gap: 5, // minimum clearance between obstacles: always an escape lane
+      layoutSeed: 7,
+      vents: 8,
+      ventPeriod: 14,
+      ventActive: 4,
+      ventRadius: 9,
+      ventPull: 3.5, // u/s
+    },
+    moon: {
+      size: 200, // wraps around
+      recentre: 20, // the world shifts in steps of this many u to keep the mech near the origin
+      crystals: 70,
+      crystalRadius: 1.1,
+      layoutSeed: 11,
+      shards: 6,
+      shardDamage: 12,
+      shardRange: 6,
+      shardSpeed: 16,
+      regrow: 25, // s
     },
   },
 

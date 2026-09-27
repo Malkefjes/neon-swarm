@@ -162,9 +162,9 @@ export interface TriggerGrant {
  * null when the trigger is skipped (and banked for the part's next trigger).
  * `capped` is true when the global triggered-effect cap is reached.
  */
-export function takeTrigger(p: Part, capped: boolean): TriggerGrant | null {
-  if (p.tokens >= 1 && !capped) {
-    p.tokens -= 1;
+export function takeTrigger(p: Part, capped: boolean, cost = 1): TriggerGrant | null {
+  if (p.tokens >= cost && !capped) {
+    p.tokens -= cost;
     const g = { power: p.bankPower, size: p.bankSize };
     p.bankPower = 0;
     p.bankSize = 0;

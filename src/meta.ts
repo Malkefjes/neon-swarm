@@ -1,6 +1,6 @@
 // Meta progression: unlocks by feat, the Link Codex, and saved progress.
 // Grows the menu, never the numbers. Persisted in localStorage.
-import { TUNING, type AnyWeaponId, type WeaponId } from './tuning';
+import { TUNING, type AnyWeaponId, type BiomeId, type FrameId, type WeaponId } from './tuning';
 import type { Feat } from './sim/world';
 
 const KEY = 'neonSwarm.profile.v1';
@@ -17,6 +17,8 @@ export interface Profile {
   threatWon: number; // highest Threat Level won, -1 for none
   wins: number;
   runs: number;
+  /** Last pre-run choices, to start from next time. */
+  setup: { frame: FrameId; biome: BiomeId; threat: number; endless: boolean };
 }
 
 export const UNLOCKS: { id: UnlockId; name: string; feat: string }[] = [
@@ -29,6 +31,7 @@ export const UNLOCKS: { id: UnlockId; name: string; feat: string }[] = [
   { id: 'moon', name: 'Crystal Mining Moon', feat: 'Win on the Station' },
   { id: 'endless', name: 'Endless mode and Threat Level 1', feat: 'Win once' },
 ];
+// Threat Levels 2-10 unlock one at a time: win at Threat N to open N + 1 (Profile.threatWon).
 
 const FEAT_UNLOCKS: Partial<Record<Feat, UnlockId[]>> = {
   broodBeaten: ['cryo'],
@@ -36,11 +39,17 @@ const FEAT_UNLOCKS: Partial<Record<Feat, UnlockId[]>> = {
   fastSurge: ['rail'],
   threeLinks: ['spark'],
   apex: ['colossus'],
-  win: ['moon', 'endless'],
+  win: ['endless'],
 };
 
+/** Where and how hard a run is being played, for win feats. */
+export interface RunContext {
+  biome: BiomeId;
+  threat: number;
+}
+
 export function emptyProfile(): Profile {
-  return { version: 1, unlocks: [], codex: {}, apex: {}, threatWon: -1, wins: 0, runs: 0 };
+  return { version: 1, unlocks: [], codex: {}, apex: {}, threatWon: -1, wins: 0, runs: 0, setup: { frame: 'vanguard', biome: 'station', threat: 0, endless: false } };
 }
 
 export interface Store {
@@ -69,6 +78,7 @@ export function loadProfile(store: Store | null = defaultStore()): Profile {
       unlocks: Array.isArray(p.unlocks) ? p.unlocks.filter((u) => UNLOCKS.some((x) => x.id === u)) : [],
       codex: typeof p.codex === 'object' && p.codex ? p.codex : {},
       apex: typeof p.apex === 'object' && p.apex ? p.apex : {},
+      setup: { ...base.setup, ...(typeof p.setup === 'object' && p.setup ? p.setup : {}) },
     };
   } catch {
     return emptyProfile();
@@ -90,14 +100,25 @@ function unlock(p: Profile, id: UnlockId, fresh: UnlockId[]): void {
 }
 
 /** Apply a feat as soon as it happens. Returns unlocks it earned. */
-export function applyFeat(p: Profile, feat: Feat): UnlockId[] {
+export function applyFeat(p: Profile, feat: Feat, ctx: RunContext = { biome: 'station', threat: 0 }): UnlockId[] {
   const fresh: UnlockId[] = [];
   for (const id of FEAT_UNLOCKS[feat] ?? []) unlock(p, id, fresh);
   if (feat === 'win') {
     p.wins++;
-    p.threatWon = Math.max(p.threatWon, 0);
+    // Win on the Station: the Moon. Win at Threat N: Threat N + 1.
+    if (ctx.biome === 'station') unlock(p, 'moon', fresh);
+    p.threatWon = Math.max(p.threatWon, ctx.threat);
   }
   return fresh;
+}
+
+/** The highest Threat Level the player may pick: 0 before any win, then one above their best win. */
+export function maxThreat(p: Profile): number {
+  return p.threatWon < 0 ? 0 : Math.min(TUNING.threat.max, p.threatWon + 1);
+}
+
+export function frameUnlocked(p: Profile, f: FrameId): boolean {
+  return f === 'vanguard' || p.unlocks.includes(f);
 }
 
 /** Log a Link to the Codex on first trigger. Returns unlocks it earned (10 Links discovered). */
@@ -116,13 +137,10 @@ export function applyRunEnd(p: Profile, pairKills: Map<string, number>, apexKill
   for (const [apex, k] of apexKills) p.apex[apex] = Math.max(p.apex[apex] ?? 0, k);
 }
 
-/** Weapons unlocked for drafting that this build implements. */
+/** Weapons unlocked for drafting. */
 export function draftWeapons(p: Profile): WeaponId[] {
-  const implemented = new Set<string>(Object.keys(TUNING.weapons));
   const out: WeaponId[] = [...TUNING.startingWeapons];
-  for (const id of ['cryo', 'ion', 'rail', 'singularity'] as const) {
-    if (p.unlocks.includes(id) && implemented.has(id)) out.push(id as unknown as WeaponId);
-  }
+  for (const id of ['cryo', 'ion', 'rail', 'singularity'] as const) if (p.unlocks.includes(id)) out.push(id);
   return out;
 }
 

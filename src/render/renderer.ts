@@ -21,6 +21,7 @@ const MAX_ARC_SEGS = 8000;
 const ENEMY_COLOUR: Record<EnemyKind, THREE.Color> = {
   mite: new THREE.Color(0xd8246e),
   skitter: new THREE.Color(0xff3d6e),
+  spitter: new THREE.Color(0xff6a3d),
   carapace: new THREE.Color(0x9c1f4a),
   splitter: new THREE.Color(0xe0457e),
   brood: new THREE.Color(0xb3164f),

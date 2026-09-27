@@ -58,6 +58,107 @@ export interface Enemy {
   marchLeft: number; // ... for this many u before hunting the mech
   gate: Float64Array; // per Link part: game time until this enemy may source another trigger
   boss: BossState | null;
+  slowUntil: number; // game time: slowed by Cryo until then
+  frozenUntil: number; // game time: frozen until then
+  chill: number; // s spent inside a Cryo cone without a break
+  chillSeen: number; // game time last inside a Cryo cone
+  spitT: number; // Spitter: s until the next glob
+}
+
+/** Where a trigger fires from: the hit point and the enemy that sourced it. */
+export interface HitPoint {
+  x: number;
+  z: number;
+  id: number;
+}
+
+export interface Mine {
+  x: number;
+  z: number;
+  arm: number; // s until armed
+  life: number;
+  damage: number;
+  blast: number;
+  chain: boolean;
+  src: Src;
+  alive: boolean;
+}
+
+export interface Rail {
+  x1: number;
+  z1: number;
+  x2: number;
+  z2: number;
+  width: number;
+  life: number;
+  maxLife: number;
+  triggered: boolean;
+}
+
+export interface Singularity {
+  x: number;
+  z: number;
+  pull: number;
+  life: number;
+  maxLife: number;
+  tickDamage: number;
+  nextTick: number;
+  ticks: number;
+  collapse: number;
+  collapseRadius: number;
+  src: Src;
+  born: number;
+  alive: boolean;
+}
+
+/** A Cryo cone this tick (for rendering). */
+export interface Cone {
+  x: number;
+  z: number;
+  dirX: number;
+  dirZ: number;
+  range: number;
+  halfAngle: number;
+  triggered: boolean;
+}
+
+export interface Freeze {
+  x: number;
+  z: number;
+  r: number;
+  life: number;
+}
+
+export interface Obstacle {
+  kind: 'box' | 'cyl';
+  x: number;
+  z: number;
+  hx: number; // box half-extents, or cylinder radius in hx
+  hz: number;
+}
+
+export interface Vent {
+  x: number;
+  z: number;
+  phase: number; // s offset into the cycle
+  active: boolean;
+}
+
+export interface Crystal {
+  x: number;
+  z: number;
+  r: number;
+  regrow: number; // s until it grows back (0 = intact)
+}
+
+export interface DelayedTrigger {
+  at: number; // game time
+  chainKey: string;
+  part: number;
+  from: HitPoint;
+  power: number;
+  size: number;
+  pair: string;
 }
 
 export interface Bolt {
@@ -76,6 +177,7 @@ export interface Bolt {
   hits: number[];
   src: Src;
   alive: boolean;
+  shard?: boolean; // Moon crystal shrapnel
 }
 
 export interface Missile {
@@ -183,7 +285,7 @@ export interface Pickup {
   state: 0 | 1;
 }
 
-export type HazardKind = 'glob' | 'puddle' | 'orb';
+export type HazardKind = 'glob' | 'puddle' | 'orb' | 'spit';
 
 export interface Hazard {
   kind: HazardKind;
