@@ -85,7 +85,7 @@ export const TUNING = {
 
   xp: {
     // XP needed to go from level L to L + 1 = base + perLevel * L
-    base: 10,
+    base: 6, // 10 -> 6, see DECISIONS.md
     perLevel: 16, // 12 -> 16, see DECISIONS.md
     coreValues: [25, 5, 1], // gold, green, blue
     maxCoresOnGround: 300, // above this, new cores merge into the nearest core

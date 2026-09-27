@@ -17,7 +17,7 @@ describe('XP curve', () => {
   const { base, perLevel } = TUNING.xp;
   it('XP_next(L) = base + perLevel x L (design form 10 + 12L; tuned values in src/tuning.ts)', () => {
     for (const L of [1, 2, 11, 40]) expect(xpNext(L)).toBe(base + perLevel * L);
-    expect(base).toBe(10);
+    expect(base).toBe(6);
     expect(perLevel).toBe(16);
   });
   it('cumulative XP is the sum of the steps', () => {
