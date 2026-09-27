@@ -109,3 +109,10 @@ None in milestone 1: every appendix value was as written. Values the appendix do
 | `crowd.cellSize` (not in appendix) | 1.2 u | 1.8 u | Performance only: a 3 × 3 cell walk now covers every overlap. |
 
 Values the appendix doesn't give for milestone 2 are in `src/tuning.ts` next to their weapon, unit or boss, and summarised in entries 34–47 above.
+
+## Directed by the owner
+
+| # | Change | Detail |
+| --- | --- | --- |
+| U1 | The player is the supplied Neon Sentinel model, not a code-generated frame. This overrides the brief's "no external asset files" and the ~1,500-triangle frame budget for the player only. | `src/assets/sentinel.glb`, bundled with the page and loaded in the background (a simple stand-in frame shows until it arrives). Built from the supplied `Meshy_AI_Neon_Sentinel_All_Animations.glb` with glTF-Transform: textures resized to 512 × 512 and converted to WebP, then `prune` and `dedup` (22.1 MB → 1.35 MB; 10,103 triangles). Scaled 1.35× (≈2.3 u tall). Plays `Running` while moving (paced to speed) and `restpose` when still; a mild glow from its own colour texture keeps it the brightest thing on screen; the hit flash tints it red. |
+| U2 | No weapon mounts or Link conduits on the mech. | Replaces design pillar 4's mounts and conduits. The build reads from the HUD hardpoints (weapons, levels, Links, Chain Levels) and the pause/run-summary chain diagrams. |

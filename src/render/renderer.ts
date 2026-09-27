@@ -1,13 +1,22 @@
-// Three.js view of the simulation. Placeholder shapes until the milestone 3 visual
-// pass; every visual is generated in code. Instanced pools keep draw calls flat
+// Three.js view of the simulation. The player is the Neon Sentinel model
+// (src/assets/sentinel.glb); everything else is generated in code, on placeholder
+// shapes until the milestone 3 visual pass. Instanced pools keep draw calls flat
 // regardless of entity counts.
 import * as THREE from 'three';
+import { GLTFLoader } from 'three/examples/jsm/loaders/GLTFLoader.js';
+import sentinelUrl from '../assets/sentinel.glb?url';
 import { TUNING, type EnemyKind, type WeaponId } from '../tuning';
 import { UP, RIGHT, FORESHORTEN } from '../sim/view';
 import { overmindBeams } from '../sim/bosses';
 import type { World } from '../sim/world';
 
 const C = TUNING.camera;
+/** The model is 1.7 u tall; this makes the frame ~2.3 u tall and ~1.3 u wide (2-3x a Mite). */
+const MODEL_SCALE = 1.35;
+/** Mech speed (u/s) at which the run cycle plays at its authored rate. */
+const RUN_ANIM_SPEED = 5;
+/** Self-illumination from the model's colour texture. */
+const MODEL_GLOW = 0.9;
 const ARC_SUBDIV = 4;
 const MAX_ARC_SEGS = 8000;
 
@@ -104,9 +113,14 @@ export class Renderer {
   private arcCol: Float32Array;
   private mech: THREE.Group;
   private mechBody: THREE.Mesh;
-  private mounts: THREE.Mesh[] = [];
-  private conduits: THREE.Mesh[] = [];
   private mechYaw = 0;
+  private placeholder = new THREE.Group();
+  private modelMats: THREE.MeshStandardMaterial[] = [];
+  private mixer: THREE.AnimationMixer | null = null;
+  private run: THREE.AnimationAction | null = null;
+  private idle: THREE.AnimationAction | null = null;
+  private moving = false;
+  private lastSimTime = 0;
   private colours: Record<string, THREE.Color> = {};
   private jag: Float32Array;
   private tmp = new THREE.Color();
@@ -199,51 +213,80 @@ export class Renderer {
     this.jag = new Float32Array(97);
     for (let i = 0; i < this.jag.length; i++) this.jag[i] = Math.abs((Math.sin(i * 12.9898) * 43758.5453) % 1);
 
-    // Mech: white chunky frame with cyan trim, weapon mounts per hardpoint
+    // Mech: the Neon Sentinel model once it loads; a simple frame stands in until then.
     this.mech = new THREE.Group();
+    this.mech.add(this.placeholder);
     this.mechBody = new THREE.Mesh(new THREE.BoxGeometry(1.3, 0.9, 1.1), new THREE.MeshLambertMaterial({ color: 0xf2f5ff, flatShading: true }));
     this.mechBody.position.y = 0.85;
-    this.mech.add(this.mechBody);
+    this.placeholder.add(this.mechBody);
     const trim = new THREE.Mesh(new THREE.BoxGeometry(1.36, 0.12, 1.16), new THREE.MeshBasicMaterial({ color: 0x3ff2ff }));
     trim.position.y = 0.95;
-    this.mech.add(trim);
-    const legMat = new THREE.MeshLambertMaterial({ color: 0xb8c0d8, flatShading: true });
-    for (const sx of [-0.4, 0.4]) {
-      const leg = new THREE.Mesh(new THREE.BoxGeometry(0.35, 0.5, 0.5), legMat);
-      leg.position.set(sx, 0.25, 0);
-      this.mech.add(leg);
-    }
-    const visor = new THREE.Mesh(new THREE.BoxGeometry(0.6, 0.18, 0.1), new THREE.MeshBasicMaterial({ color: 0x3ff2ff }));
-    visor.position.set(0, 1.05, 0.56);
-    this.mech.add(visor);
-    // Mount spots: shoulders, back, forearms, drone bay
-    const spots: [number, number, number][] = [
-      [-0.8, 1.35, 0.1],
-      [0.8, 1.35, 0.1],
-      [0, 1.5, -0.45],
-      [-0.85, 0.75, 0.45],
-      [0.85, 0.75, 0.45],
-      [0, 0.4, -0.6],
-    ];
-    for (const [x, y, z] of spots) {
-      const m = new THREE.Mesh(new THREE.BoxGeometry(0.36, 0.36, 0.6), new THREE.MeshBasicMaterial({ color: 0xffffff }));
-      m.position.set(x, y, z);
-      m.visible = false;
-      this.mech.add(m);
-      this.mounts.push(m);
-    }
-    for (let i = 0; i < 6; i++) {
-      const c = new THREE.Mesh(new THREE.CylinderGeometry(0.06, 0.06, 1, 6), new THREE.MeshBasicMaterial({ color: 0xffffff }));
-      c.visible = false;
-      this.mech.add(c);
-      this.conduits.push(c);
-    }
+    this.placeholder.add(trim);
     this.scene.add(this.mech);
+    this.loadModel();
 
     for (const id of Object.keys(TUNING.weapons) as WeaponId[]) {
       this.colours[id] = weaponColour(id);
       this.colours[id + ':t'] = weaponColour(id).multiplyScalar(TUNING.links.triggeredVisualScale);
     }
+  }
+
+  /** Load the player model (bundled with the page). Keeps the stand-in frame if it fails. */
+  private loadModel(): void {
+    new GLTFLoader().load(
+      sentinelUrl,
+      (gltf) => {
+        const model = gltf.scene;
+        model.scale.setScalar(MODEL_SCALE);
+        model.traverse((o) => {
+          const mesh = o as THREE.Mesh;
+          if (mesh.isMesh) {
+            mesh.frustumCulled = false;
+            const mat = mesh.material as THREE.MeshStandardMaterial;
+            // No environment map in this scene: keep metals from rendering black, and let the
+            // model's own colours glow a little so the player stays the brightest thing on screen
+            mat.metalness = Math.min(mat.metalness, 0.4);
+            mat.emissiveMap = mat.map;
+            mat.emissive.setHex(0xffffff);
+            mat.emissiveIntensity = MODEL_GLOW;
+            mat.needsUpdate = true;
+            this.modelMats.push(mat);
+          }
+        });
+        this.mixer = new THREE.AnimationMixer(model);
+        const clip = (n: string) => gltf.animations.find((a) => a.name === n);
+        const run = clip('Running');
+        const idle = clip('restpose');
+        if (run) this.run = this.mixer.clipAction(run);
+        if (idle) this.idle = this.mixer.clipAction(idle);
+        this.idle?.play();
+        this.placeholder.visible = false;
+        this.mech.add(model);
+      },
+      undefined,
+      () => console.warn('Neon Swarm: player model failed to load; using the stand-in frame'),
+    );
+  }
+
+  /** Model animation: run while moving (paced to speed), rest pose when still. Follows game time. */
+  private animateModel(w: World): void {
+    if (!this.mixer) return;
+    let dt = w.time - this.lastSimTime;
+    this.lastSimTime = w.time;
+    if (dt < 0 || dt > 0.25) dt = 0;
+    const speed = Math.hypot(w.vx, w.vz);
+    const moving = speed > 0.5 && !w.dead;
+    if (moving !== this.moving) {
+      this.moving = moving;
+      const from = moving ? this.idle : this.run;
+      const to = moving ? this.run : this.idle;
+      if (to) {
+        to.reset().play();
+        if (from) to.crossFadeFrom(from, 0.15, false);
+      }
+    }
+    if (this.run) this.run.timeScale = Math.max(0.6, speed / RUN_ANIM_SPEED);
+    this.mixer.update(dt);
   }
 
   info(): string {
@@ -307,7 +350,11 @@ export class Renderer {
     this.mech.visible = !w.dead || w.tick % 6 < 3;
     const flashing = w.invuln > 0 && Math.floor(realTime * 20) % 2 === 0;
     (this.mechBody.material as THREE.MeshLambertMaterial).emissive.setHex(flashing ? 0xff3355 : 0x000000);
-    this.updateMounts(w);
+    for (const m of this.modelMats) {
+      m.emissive.setHex(flashing ? 0xff3355 : 0xffffff);
+      m.emissiveIntensity = flashing ? 1.5 : MODEL_GLOW;
+    }
+    this.animateModel(w);
 
     // Enemies
     for (const e of w.enemies) {
@@ -397,37 +444,6 @@ export class Renderer {
 
     this.updateArcs(w);
     this.gl.render(this.scene, this.camera);
-  }
-
-  private updateMounts(w: World): void {
-    let mi = 0;
-    let ci = 0;
-    for (const m of this.mounts) m.visible = false;
-    for (const c of this.conduits) c.visible = false;
-    for (const chain of w.build.hardpoints) {
-      if (!chain) continue;
-      const first = mi;
-      for (const p of chain.parts) {
-        const m = this.mounts[mi++];
-        if (!m) break;
-        m.visible = true;
-        (m.material as THREE.MeshBasicMaterial).color.setHex(TUNING.weaponInfo[p.weapon.id].colour);
-        const s = 0.7 + p.weapon.level * 0.08;
-        m.scale.set(s, s, s);
-      }
-      // A Link draws a glowing conduit between its mounts
-      for (let k = first; k < mi - 1 && ci < this.conduits.length; k++) {
-        const a = this.mounts[k].position;
-        const b = this.mounts[k + 1].position;
-        const c = this.conduits[ci++];
-        c.visible = true;
-        c.position.set((a.x + b.x) / 2, (a.y + b.y) / 2 + 0.25, (a.z + b.z) / 2);
-        c.scale.set(1.4, a.distanceTo(b), 1.4);
-        c.quaternion.setFromUnitVectors(new THREE.Vector3(0, 1, 0), new THREE.Vector3().subVectors(b, a).normalize());
-        const pulse = 0.6 + 0.4 * Math.sin(w.tick * 0.2);
-        (c.material as THREE.MeshBasicMaterial).color.setRGB(pulse, pulse, pulse);
-      }
-    }
   }
 
   private updateArcs(w: World): void {

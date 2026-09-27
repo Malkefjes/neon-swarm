@@ -23,6 +23,7 @@ Every push to `main` is tested, built and deployed to GitHub Pages (`.github/wor
 - `src/sim/` — the deterministic, headless simulation (no DOM). `world.ts` is the game step; `weapons.ts` the six weapons and their trigger forms; `director.ts` spawning, elites and Surges; `bosses.ts` the Brood Mother and Overmind; `build.ts` the hardpoints and Link rules; `draft.ts` the level-up cards; `formulas.ts` the design's formulas; `bot.ts` the autopilot for simulated runs.
 - `src/meta.ts` — unlocks, the Codex and saved progress (localStorage).
 - `src/render/` — Three.js renderer (placeholder shapes until milestone 3), the DOM HUD and the menu screens.
+- `src/assets/sentinel.glb` — the player model (see DECISIONS.md U1 for how it was optimised).
 - `src/dev.ts` — hidden dev tools.
 - `tests/` — Vitest suites. `tools/` — simulation runner and the milestone check script.
 
