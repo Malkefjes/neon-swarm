@@ -86,7 +86,7 @@ export function commandsFromUrl(params: URLSearchParams): DevCommand[] {
   const t = params.get('t');
   if (t) out.push({ cmd: 'time', seconds: Number(t) });
   const bench = params.get('bench');
-  if (bench) out.push({ cmd: 'bench', count: Number(bench), minutes: Number(params.get('minutes') ?? 15) });
+  if (bench) out.push({ cmd: 'bench', count: Number(bench), minutes: Number(params.get('minutes') ?? 15), mixed: params.get('mixed') === '1' });
   if (params.get('surge') === '1') out.push({ cmd: 'surge' });
   const boss = params.get('boss');
   if (boss === 'brood' || boss === 'overmind') out.push({ cmd: 'boss', kind: boss });

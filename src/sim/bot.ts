@@ -132,7 +132,7 @@ export function botMove(w: World): [number, number] {
       fz += (dz / d) * 1.2;
     }
     // Step away from the nearest beam line
-    for (const s of overmindBeams(b)) {
+    for (const s of overmindBeams(b, w.threat)) {
       const bx = s.x2 - s.x1;
       const bz = s.z2 - s.z1;
       const l2 = bx * bx + bz * bz;
@@ -222,12 +222,17 @@ export function botChoose(cards: Card[]): number {
   return best;
 }
 
+/** Which order to take a Link in: alternates with the level, so builds vary. */
+export function botOrder(w: World): number {
+  return w.level % 2;
+}
+
 /** Run a full simulated run with the bot until `seconds` of game time or death. */
 export function runBot(w: World, seconds: number, onTick?: (w: World) => void): World {
   let guard = 0;
   while (!w.runOver && w.time < seconds && guard++ < seconds * 200) {
     if (w.draft) {
-      w.choose(botChoose(w.draft), 0);
+      w.choose(botChoose(w.draft), botOrder(w));
       continue;
     }
     const [mx, my] = botMove(w);

@@ -1,39 +1,40 @@
-// Three.js view of the simulation. The player is the Neon Sentinel model
-// (src/assets/sentinel.glb); everything else is generated in code, on placeholder
-// shapes until the milestone 3 visual pass. Instanced pools keep draw calls flat
-// regardless of entity counts.
+// Three.js view of the simulation. The player is the supplied Neon Sentinel model
+// (src/assets/sentinel.glb); everything else is generated in code: low-poly flat-shaded
+// models, canvas-texture floors, additive effects, and bloom. Instanced pools keep draw
+// calls flat regardless of entity counts.
 import * as THREE from 'three';
 import { GLTFLoader } from 'three/examples/jsm/loaders/GLTFLoader.js';
+import { EffectComposer } from 'three/examples/jsm/postprocessing/EffectComposer.js';
+import { RenderPass } from 'three/examples/jsm/postprocessing/RenderPass.js';
+import { UnrealBloomPass } from 'three/examples/jsm/postprocessing/UnrealBloomPass.js';
+import { OutputPass } from 'three/examples/jsm/postprocessing/OutputPass.js';
 import sentinelUrl from '../assets/sentinel.glb?url';
-import { TUNING, type EnemyKind, type WeaponId } from '../tuning';
+import { TUNING, type BiomeId, type EnemyKind, type WeaponId } from '../tuning';
 import { UP, RIGHT, FORESHORTEN } from '../sim/view';
 import { overmindBeams } from '../sim/bosses';
-import type { World } from '../sim/world';
+import type { World, WorldEvent } from '../sim/world';
+import * as M from './models';
+import { Environment } from './env';
 
 const C = TUNING.camera;
-/** The model is 1.7 u tall; this makes the frame ~2.3 u tall and ~1.3 u wide (2-3x a Mite). */
+/** The model is 1.7 u tall; this makes VANGUARD ~2.3 u tall (2-3x a Mite). Frames scale from here. */
 const MODEL_SCALE = 1.35;
 /** Mech speed (u/s) at which the run cycle plays at its authored rate. */
 const RUN_ANIM_SPEED = 5;
 const ARC_SUBDIV = 4;
 const MAX_ARC_SEGS = 8000;
+const MAX_SHARDS = 3000;
+const MAX_TRAIL = 2000;
 
-const ENEMY_COLOUR: Record<EnemyKind, THREE.Color> = {
-  mite: new THREE.Color(0xd8246e),
-  skitter: new THREE.Color(0xff3d6e),
-  spitter: new THREE.Color(0xff6a3d),
-  carapace: new THREE.Color(0x9c1f4a),
-  splitter: new THREE.Color(0xe0457e),
-  brood: new THREE.Color(0xb3164f),
-  overmind: new THREE.Color(0xff2a55),
+/** One warm hue family per biome: magenta on the Station, red on the Moon. */
+const ENEMY_HUES: Record<BiomeId, Record<EnemyKind, number>> = {
+  station: { mite: 0xd8246e, skitter: 0xff3d8e, carapace: 0x9c1f5a, spitter: 0xff5aa8, splitter: 0xe0457e, brood: 0xb3164f, overmind: 0xff2a70 },
+  moon: { mite: 0xd82a2a, skitter: 0xff4a36, carapace: 0x98201e, spitter: 0xff6a3a, splitter: 0xe0484a, brood: 0xb81c22, overmind: 0xff3036 },
 };
 const WHITE = new THREE.Color(0xffffff);
-const CORE_COLOURS = [new THREE.Color(0x2f7bff), new THREE.Color(0x2dff8a), new THREE.Color(0xffc21a)];
+const ICE = new THREE.Color(0xd8f4ff);
+const CORE_COLOURS = [new THREE.Color(0x3a86ff).multiplyScalar(1.4), new THREE.Color(0x2dff8a).multiplyScalar(1.3), new THREE.Color(0xffc21a).multiplyScalar(1.4)];
 const HAZARD = new THREE.Color(0xff5a1f);
-
-function weaponColour(id: WeaponId): THREE.Color {
-  return new THREE.Color(TUNING.weaponInfo[id].colour);
-}
 
 /** An instanced mesh filled from scratch every frame. */
 class Pool {
@@ -102,10 +103,27 @@ function additive(): THREE.MeshBasicMaterial {
   return new THREE.MeshBasicMaterial({ transparent: true, blending: THREE.AdditiveBlending, depthWrite: false, side: THREE.DoubleSide });
 }
 
+/** Renderer-side particles (visual only: never touch the simulation). */
+interface Particle {
+  x: number;
+  y: number;
+  z: number;
+  vx: number;
+  vy: number;
+  vz: number;
+  life: number;
+  maxLife: number;
+  size: number;
+  spin: number;
+  col: THREE.Color;
+}
+
 export class Renderer {
   readonly gl: THREE.WebGLRenderer;
   private scene = new THREE.Scene();
   private camera: THREE.OrthographicCamera;
+  private composer: EffectComposer;
+  private bloom: UnrealBloomPass;
   private pools: Record<string, Pool> = {};
   private arcGeo: THREE.BufferGeometry;
   private arcPos: Float32Array;
@@ -114,48 +132,54 @@ export class Renderer {
   private mechBody: THREE.Mesh;
   private mechYaw = 0;
   private placeholder = new THREE.Group();
-  private model: THREE.Object3D | null = null;
   private mixer: THREE.AnimationMixer | null = null;
   private run: THREE.AnimationAction | null = null;
   private idle: THREE.AnimationAction | null = null;
   private moving = false;
   private lastSimTime = 0;
+  private ring: THREE.Mesh;
   private colours: Record<string, THREE.Color> = {};
+  private hues: Record<EnemyKind, THREE.Color>;
+  private glows: Record<EnemyKind, THREE.Color>;
   private jag: Float32Array;
   private tmp = new THREE.Color();
+  private tmp2 = new THREE.Color();
   private collapse: THREE.Mesh;
+  private env: Environment | null = null;
+  private envWorld: World | null = null;
+  private shards: Particle[] = [];
+  private trails: Particle[] = [];
+  private lastReal = 0;
   private halfW = 15;
   private halfH = 8.5;
+  /** 'high': bloom on. 'low': plain render (automatic quality scaling arrives in milestone 4). */
+  quality: 'high' | 'low' = 'high';
+  /** Resolves when the player model is ready (or failed, falling back to the stand-in frame). */
+  readonly modelReady: Promise<void>;
+  private markReady!: () => void;
   shake = 0;
 
   constructor(canvas: HTMLCanvasElement) {
     this.gl = new THREE.WebGLRenderer({ canvas, antialias: true, powerPreference: 'high-performance' });
     this.gl.setPixelRatio(Math.min(window.devicePixelRatio || 1, 1.5));
-    this.gl.setClearColor(0x0b0e15);
+    this.gl.setClearColor(0x07090e);
+    this.gl.info.autoReset = false;
     this.camera = new THREE.OrthographicCamera(-15, 15, 8.5, -8.5, 0.1, 200);
+    this.scene.background = new THREE.Color(0x07090e);
 
     // Lighting: one directional + ambient
-    this.scene.add(new THREE.AmbientLight(0x8890a8, 1.4));
-    const sun = new THREE.DirectionalLight(0xffffff, 1.6);
+    this.scene.add(new THREE.AmbientLight(0x8a90a8, 1.3));
+    const sun = new THREE.DirectionalLight(0xffffff, 1.8);
     sun.position.set(-20, 40, 10);
     this.scene.add(sun);
 
-    // Arena floor in muted mid-tones, grid and boundary
-    const half = TUNING.arena.halfSize;
-    const floor = new THREE.Mesh(new THREE.PlaneGeometry(half * 2, half * 2), new THREE.MeshLambertMaterial({ color: 0x1b2130 }));
-    floor.rotation.x = -Math.PI / 2;
-    this.scene.add(floor);
-    const grid = new THREE.GridHelper(half * 2, 50, 0x2c3548, 0x242b3b);
-    grid.position.y = 0.01;
-    this.scene.add(grid);
-    const wallMat = new THREE.MeshLambertMaterial({ color: 0x3a4460 });
-    for (let i = 0; i < 4; i++) {
-      const wall = new THREE.Mesh(new THREE.BoxGeometry(half * 2 + 2, 1.5, 1), wallMat);
-      const a = (i * Math.PI) / 2;
-      wall.position.set(Math.sin(a) * (half + 0.5), 0.75, Math.cos(a) * (half + 0.5));
-      wall.rotation.y = a;
-      this.scene.add(wall);
-    }
+    // Post: bloom on emissive accents, at half resolution
+    this.composer = new EffectComposer(this.gl);
+    this.composer.addPass(new RenderPass(this.scene, this.camera));
+    this.bloom = new UnrealBloomPass(new THREE.Vector2(512, 256), 0.85, 0.45, 0.72);
+    this.composer.addPass(this.bloom);
+    this.composer.addPass(new OutputPass());
+
     // The Overmind's collapsing arena edge
     this.collapse = new THREE.Mesh(new THREE.RingGeometry(0.985, 1, 128), new THREE.MeshBasicMaterial({ color: 0xff2a55, side: THREE.DoubleSide }));
     this.collapse.rotation.x = -Math.PI / 2;
@@ -163,39 +187,50 @@ export class Renderer {
     this.collapse.visible = false;
     this.scene.add(this.collapse);
 
-    const lambert = () => new THREE.MeshLambertMaterial({ flatShading: true });
     const S = this.scene;
-    // Enemies: silhouettes by role (spiky = fast, round = tank)
-    const mite = new THREE.ConeGeometry(0.42, 0.8, 4, 1).rotateX(Math.PI / 2).translate(0, 0.4, 0);
-    const skitter = new THREE.ConeGeometry(0.3, 0.9, 3, 1).rotateX(Math.PI / 2).translate(0, 0.3, 0);
-    const carapace = new THREE.SphereGeometry(0.9, 8, 4, 0, Math.PI * 2, 0, Math.PI / 2).scale(1, 0.7, 1);
-    const splitter = new THREE.OctahedronGeometry(0.6, 0).translate(0, 0.6, 0);
-    this.pools.mite = new Pool(S, mite, lambert(), 1500);
-    this.pools.skitter = new Pool(S, skitter, lambert(), 1500);
-    this.pools.carapace = new Pool(S, carapace, lambert(), 600);
-    this.pools.splitter = new Pool(S, splitter, lambert(), 600);
+    const body = () => new THREE.MeshLambertMaterial({ vertexColors: true, flatShading: true });
+    // Enemies: body (lit, hue from instance colour) + glow (unlit, blooms)
+    const units: [EnemyKind, M.UnitModel, number][] = [
+      ['mite', M.mite(), 1500],
+      ['skitter', M.skitter(), 1500],
+      ['carapace', M.carapace(), 700],
+      ['spitter', M.spitter(), 600],
+      ['splitter', M.splitter(), 700],
+      ['brood', M.brood(), 2],
+      ['overmind', M.overmind(), 2],
+    ];
+    for (const [kind, model, max] of units) {
+      this.pools[kind] = new Pool(S, model.body, body(), max);
+      this.pools[kind + ':glow'] = new Pool(S, model.glow, new THREE.MeshBasicMaterial({ vertexColors: true }), max);
+    }
     // Elite glow: an additive disc under the unit
     this.pools.eliteGlow = new Pool(S, new THREE.CircleGeometry(1, 24).rotateX(-Math.PI / 2), additive(), 64);
-    // Bosses
-    const brood = new THREE.IcosahedronGeometry(1, 0).scale(1, 0.6, 1.2).translate(0, 0.6, 0);
-    this.pools.brood = new Pool(S, brood, lambert(), 2);
-    const overmind = new THREE.IcosahedronGeometry(1, 1).scale(1, 1.4, 1).translate(0, 1.4, 0);
-    this.pools.overmind = new Pool(S, overmind, lambert(), 2);
+    this.pools.shadow = new Pool(S, new THREE.CircleGeometry(1, 12).rotateX(-Math.PI / 2), new THREE.MeshBasicMaterial({ color: 0x000000, transparent: true, opacity: 0.35, depthWrite: false }), 1500);
 
     // Weapon effects
-    this.pools.bolt = new Pool(S, new THREE.BoxGeometry(0.16, 0.16, 0.7), new THREE.MeshBasicMaterial(), 4000);
+    this.pools.bolt = new Pool(S, new THREE.BoxGeometry(0.16, 0.16, 0.9), new THREE.MeshBasicMaterial(), 4000);
     this.pools.missile = new Pool(S, new THREE.ConeGeometry(0.14, 0.55, 4).rotateX(Math.PI / 2), new THREE.MeshBasicMaterial(), 1500);
     this.pools.shell = new Pool(S, new THREE.IcosahedronGeometry(0.28, 0), new THREE.MeshBasicMaterial(), 500);
     this.pools.zone = new Pool(S, new THREE.CircleGeometry(1, 28).rotateX(-Math.PI / 2), additive(), 1600);
     this.pools.ring = new Pool(S, new THREE.RingGeometry(0.86, 1, 40).rotateX(-Math.PI / 2), additive(), 1600);
     this.pools.blade = new Pool(S, new THREE.BoxGeometry(0.9, 0.08, 0.22), new THREE.MeshBasicMaterial(), 2000);
+    this.pools.cone = new Pool(S, new THREE.CircleGeometry(1, 16, -Math.PI / 4, Math.PI / 2).rotateX(-Math.PI / 2), additive(), 8);
+    this.pools.rail = new Pool(S, new THREE.BoxGeometry(1, 0.25, 1).translate(0.5, 0, 0), additive(), 400);
+    this.pools.mine = new Pool(S, M.mine(), new THREE.MeshBasicMaterial({ vertexColors: true }), 800);
+    this.pools.singCore = new Pool(S, new THREE.IcosahedronGeometry(0.5, 1), new THREE.MeshBasicMaterial({ color: 0x050008 }), 400);
+    this.pools.singSwirl = new Pool(S, new THREE.RingGeometry(0.2, 1, 24, 1, 0, Math.PI * 1.6).rotateX(-Math.PI / 2), additive(), 400);
     // Enemy attacks and hazards
-    this.pools.glob = new Pool(S, new THREE.IcosahedronGeometry(0.35, 0), new THREE.MeshBasicMaterial(), 200);
+    this.pools.glob = new Pool(S, new THREE.IcosahedronGeometry(0.35, 0), new THREE.MeshBasicMaterial(), 400);
     this.pools.puddle = new Pool(S, new THREE.CircleGeometry(1, 20).rotateX(-Math.PI / 2), additive(), 200);
     this.pools.beam = new Pool(S, new THREE.BoxGeometry(1, 0.3, 1).translate(0.5, 0, 0), additive(), 16);
     // Pickups: XP cores are faceted spinning gems (a shape no weapon effect uses)
     this.pools.core = new Pool(S, new THREE.OctahedronGeometry(0.22, 0).scale(1, 1.5, 1), new THREE.MeshBasicMaterial(), TUNING.xp.maxCoresOnGround);
-    this.pools.pickup = new Pool(S, new THREE.BoxGeometry(0.55, 0.55, 0.55), new THREE.MeshBasicMaterial(), 64);
+    this.pools.repair = new Pool(S, M.repairKit(), new THREE.MeshBasicMaterial({ vertexColors: true }), 16);
+    this.pools.magnet = new Pool(S, M.magnet(), new THREE.MeshBasicMaterial({ vertexColors: true }), 16);
+    this.pools.cache = new Pool(S, M.cache(), new THREE.MeshBasicMaterial({ vertexColors: true }), 32);
+    // Particles
+    this.pools.shard = new Pool(S, M.shard(), new THREE.MeshBasicMaterial(), MAX_SHARDS);
+    this.pools.trail = new Pool(S, new THREE.PlaneGeometry(0.22, 0.22).rotateX(-Math.PI / 2), additive(), MAX_TRAIL);
 
     // Tesla arcs: flat jagged ribbons, additive
     this.arcPos = new Float32Array(MAX_ARC_SEGS * 6 * 3);
@@ -222,11 +257,27 @@ export class Renderer {
     trim.position.y = 0.95;
     this.placeholder.add(trim);
     this.scene.add(this.mech);
+    // A cyan ring under the player, so the frame never gets lost in the crowd
+    this.ring = new THREE.Mesh(new THREE.RingGeometry(0.95, 1.1, 40).rotateX(-Math.PI / 2), new THREE.MeshBasicMaterial({ color: 0x3ff2ff, transparent: true, opacity: 0.8 }));
+    this.ring.position.y = 0.03;
+    this.scene.add(this.ring);
+    this.modelReady = new Promise((res) => (this.markReady = res));
     this.loadModel();
 
     for (const id of Object.keys(TUNING.weapons) as WeaponId[]) {
-      this.colours[id] = weaponColour(id);
-      this.colours[id + ':t'] = weaponColour(id).multiplyScalar(TUNING.links.triggeredVisualScale);
+      this.colours[id] = new THREE.Color(TUNING.weaponInfo[id].colour);
+      this.colours[id + ':t'] = new THREE.Color(TUNING.weaponInfo[id].colour).multiplyScalar(TUNING.links.triggeredVisualScale);
+    }
+    this.hues = {} as Record<EnemyKind, THREE.Color>;
+    this.glows = {} as Record<EnemyKind, THREE.Color>;
+    this.setBiome('station');
+  }
+
+  private setBiome(b: BiomeId): void {
+    for (const k of Object.keys(ENEMY_HUES[b]) as EnemyKind[]) {
+      this.hues[k] = new THREE.Color(ENEMY_HUES[b][k]);
+      // Glow: a bright, lighter version of the hue
+      this.glows[k] = new THREE.Color(ENEMY_HUES[b][k]).lerp(WHITE, 0.45).multiplyScalar(1.6);
     }
   }
 
@@ -236,7 +287,6 @@ export class Renderer {
       sentinelUrl,
       (gltf) => {
         const model = gltf.scene;
-        model.scale.setScalar(MODEL_SCALE);
         model.traverse((o) => {
           if ((o as THREE.Mesh).isMesh) o.frustumCulled = false;
         });
@@ -249,10 +299,13 @@ export class Renderer {
         this.idle?.play();
         this.placeholder.visible = false;
         this.mech.add(model);
-        this.model = model;
+        this.markReady();
       },
       undefined,
-      () => console.warn('Neon Swarm: player model failed to load; using the stand-in frame'),
+      () => {
+        console.warn('Neon Swarm: player model failed to load; using the stand-in frame');
+        this.markReady();
+      },
     );
   }
 
@@ -284,6 +337,10 @@ export class Renderer {
 
   resize(w: number, h: number): void {
     this.gl.setSize(w, h, false);
+    const pr = this.gl.getPixelRatio();
+    this.composer.setPixelRatio(pr);
+    this.composer.setSize(w, h);
+    this.bloom.resolution.set((w * pr) / 2, (h * pr) / 2);
     const aspect = w / h;
     // Always show at least the base 30 x 17 view
     this.halfH = Math.max(C.viewHeight / 2, C.viewWidth / 2 / aspect);
@@ -304,15 +361,69 @@ export class Renderer {
     return { x: cssW / 2 + (sx / this.halfW) * (cssW / 2), y: cssH / 2 - (sy / this.halfH) * (cssH / 2) };
   }
 
+  /** Visual reactions to sim events: death shatters, explosions. */
+  onEvents(w: World, events: WorldEvent[]): void {
+    for (const ev of events) {
+      if (ev.type === 'kill') {
+        // Death: the enemy shatters into 4-6 shards that fade within 0.5 s
+        const n = ev.kind === 'brood' || ev.kind === 'overmind' ? 24 : 4 + Math.floor(Math.random() * 3);
+        const col = ev.frozen ? ICE : this.hues[ev.kind];
+        for (let i = 0; i < n && this.shards.length < MAX_SHARDS; i++) this.spawnShard(ev.x, ev.z, ev.r, col);
+      } else if (ev.type === 'shatter') {
+        const col = this.tmp2.setHex(0xc9a0ff).clone();
+        for (let i = 0; i < 8 && this.shards.length < MAX_SHARDS; i++) this.spawnShard(ev.x, ev.z, 1.2, col);
+      } else if (ev.type === 'boom') {
+        if (ev.r >= 2) this.shake = Math.max(this.shake, 0.18);
+      }
+    }
+    void w;
+  }
+
+  private spawnShard(x: number, z: number, r: number, col: THREE.Color): void {
+    const a = Math.random() * Math.PI * 2;
+    const sp = 2 + Math.random() * 4;
+    this.shards.push({
+      x: x + Math.cos(a) * r * 0.3,
+      y: 0.3 + Math.random() * r * 0.6,
+      z: z + Math.sin(a) * r * 0.3,
+      vx: Math.cos(a) * sp,
+      vy: 2 + Math.random() * 3,
+      vz: Math.sin(a) * sp,
+      life: 0.5,
+      maxLife: 0.5,
+      size: 0.6 + Math.random() * 0.6 * Math.max(1, r),
+      spin: Math.random() * 10,
+      col,
+    });
+  }
+
   private col(id: WeaponId, triggered: boolean): THREE.Color {
     return this.colours[triggered ? id + ':t' : id];
   }
 
   render(w: World, alpha: number, realTime: number): void {
     const lerp = (a: number, b: number) => a + (b - a) * alpha;
+    const realDt = Math.min(0.1, Math.max(0, realTime - this.lastReal));
+    this.lastReal = realTime;
     const P = this.pools;
     for (const k in P) P[k].begin();
     const tv = TUNING.links.triggeredVisualScale;
+
+    // Environment follows the run's biome
+    if (this.envWorld !== w) {
+      if (!this.env || this.env.biome !== w.biome) {
+        if (this.env) {
+          this.scene.remove(this.env.group);
+          this.env.dispose();
+        }
+        this.env = new Environment(w);
+        this.scene.add(this.env.group);
+        this.setBiome(w.biome);
+      }
+      this.envWorld = w;
+      this.shards.length = 0;
+      this.trails.length = 0;
+    }
 
     // Camera: orthographic isometric, soft follow simulated in the world
     let cx = lerp(w.pcamX, w.camX);
@@ -326,48 +437,58 @@ export class Renderer {
     const dist = 60;
     this.camera.position.set(cx - UP.x * dist * Math.cos(pitch), dist * Math.sin(pitch), cz - UP.z * dist * Math.cos(pitch));
     this.camera.lookAt(cx, 0, cz);
+    this.env!.update(w, cx, cz, realTime);
 
     // Mech
-    this.mech.position.set(lerp(w.px, w.x), 0, lerp(w.pz, w.z));
+    const mx = lerp(w.px, w.x);
+    const mz = lerp(w.pz, w.z);
+    this.mech.position.set(mx, 0, mz);
+    this.mech.scale.setScalar(MODEL_SCALE * TUNING.frames[w.frame].scale);
+    this.ring.position.set(mx, 0.03, mz);
+    this.ring.scale.setScalar(TUNING.frames[w.frame].scale);
     if (Math.hypot(w.vx, w.vz) > 0.5) {
       let d = Math.atan2(w.vx, w.vz) - this.mechYaw;
       d = Math.atan2(Math.sin(d), Math.cos(d));
       this.mechYaw += d * 0.25;
     }
     this.mech.rotation.y = this.mechYaw;
-    this.mech.visible = !w.dead || w.tick % 6 < 3;
-    const flashing = w.invuln > 0 && Math.floor(realTime * 20) % 2 === 0;
-    (this.mechBody.material as THREE.MeshLambertMaterial).emissive.setHex(flashing ? 0xff3355 : 0x000000);
-    if (this.model) this.model.visible = !flashing;
+    // Hit flash: the mech blinks while invulnerable; it flickers out as it dies
+    const flashing = (w.invuln > 0 && Math.floor(realTime * 20) % 2 === 0) || (w.dead && w.tick % 6 >= 3);
+    this.mech.visible = !flashing;
+    this.ring.visible = !w.dead;
+    (this.mechBody.material as THREE.MeshLambertMaterial).emissive.setHex(0x000000);
     this.animateModel(w);
 
     // Enemies
+    const now = w.time;
     for (const e of w.enemies) {
       const x = lerp(e.px, e.x);
       const z = lerp(e.pz, e.z);
       const yaw = Math.atan2(e.fx, e.fz);
       const flash = w.tick - e.lastHit <= TUNING.sim.hitFlashTicks;
-      const col = flash ? WHITE : ENEMY_COLOUR[e.kind];
-      if (e.boss) {
-        const s = e.r;
-        P[e.kind].add(x, 0, z, e.kind === 'overmind' ? realTime * 0.3 : yaw, s, s, s, col);
-        if (e.kind === 'brood' && e.boss.telegraph > 0) {
-          // Charge telegraph: a red line along the dash
-          const pulse = 0.6 + 0.4 * Math.sin(realTime * 30);
-          P.beam.add(x, 0.1, z, Math.atan2(e.boss.dirX, e.boss.dirZ) - Math.PI / 2, TUNING.bosses.brood.chargeDistance, 1, 0.5, HAZARD, pulse);
-        }
-        continue;
+      const frozen = e.frozenUntil > now;
+      let col = this.hues[e.kind];
+      if (flash) col = WHITE;
+      else if (frozen) col = ICE;
+      else if (e.slowUntil > now) col = this.tmp.copy(col).lerp(ICE, 0.35);
+      const s = e.boss ? e.r : e.r / TUNING.enemies[e.kind as 'mite'].radius;
+      const spin = e.kind === 'overmind' ? realTime * 0.3 : yaw;
+      P[e.kind].add(x, 0, z, spin, s, s, s, col);
+      P[e.kind + ':glow'].add(x, 0, z, spin, s, s, s, frozen ? ICE : this.glows[e.kind]);
+      if (!e.boss) P.shadow.add(x, 0.02, z, 0, e.r * 1.1, 1, e.r * 1.1, WHITE);
+      if (e.boss?.telegraph) {
+        // Brood Mother charge telegraph: a red line along the dash
+        const pulse = 0.6 + 0.4 * Math.sin(realTime * 30);
+        P.beam.add(x, 0.1, z, Math.atan2(e.boss.dirX, e.boss.dirZ) - Math.PI / 2, TUNING.bosses.brood.chargeDistance, 1, 0.5, HAZARD, pulse);
       }
-      const s = e.r / TUNING.enemies[e.kind as 'mite'].radius;
-      P[e.kind].add(x, 0, z, yaw, s, s, s, col);
       if (e.elite) {
         const glow = e.elite === 2 && e.shield > 0 ? 0x66ccff : 0xffffff;
-        P.eliteGlow.add(x, 0.03, z, 0, e.r * 1.35, 1, e.r * 1.35, this.tmp.setHex(glow), 0.35 + 0.15 * Math.sin(realTime * 6));
+        P.eliteGlow.add(x, 0.03, z, 0, e.r * 1.35, 1, e.r * 1.35, this.tmp2.setHex(glow), 0.35 + 0.15 * Math.sin(realTime * 6));
       }
     }
     for (const b of w.bosses) {
       if (b.kind !== 'overmind' || !b.boss) continue;
-      for (const s of overmindBeams(b)) {
+      for (const s of overmindBeams(b, w.threat)) {
         const len = Math.hypot(s.x2 - s.x1, s.z2 - s.z1);
         P.beam.add(s.x1, 0.8, s.z1, Math.atan2(s.x2 - s.x1, s.z2 - s.z1) - Math.PI / 2, len, 1, TUNING.bosses.overmind.beamWidth, HAZARD);
       }
@@ -377,11 +498,18 @@ export class Renderer {
     for (const b of w.bolts) {
       const k = b.src.triggered ? tv : 1;
       const r = (b.radius / TUNING.weapons.pulse.boltRadius) * k;
-      P.bolt.add(lerp(b.px, b.x), 0.7, lerp(b.pz, b.z), Math.atan2(b.dx, b.dz), r, r, k, this.col('pulse', b.src.triggered));
+      const col = b.shard ? this.tmp2.setHex(0xd4b0ff) : this.col(b.src.weapon === 'pulse' ? 'pulse' : b.src.weapon, b.src.triggered);
+      P.bolt.add(lerp(b.px, b.x), 0.7, lerp(b.pz, b.z), Math.atan2(b.dx, b.dz), r, r, k, col);
     }
     for (const m of w.missiles) {
       const k = m.src.triggered ? tv : 1;
-      P.missile.add(lerp(m.px, m.x), 0.7, lerp(m.pz, m.z), Math.atan2(m.dx, m.dz), k, k, k, this.col('seeker', m.src.triggered));
+      const x = lerp(m.px, m.x);
+      const z = lerp(m.pz, m.z);
+      P.missile.add(x, 0.7, z, Math.atan2(m.dx, m.dz), k, k, k, this.col('seeker', m.src.triggered));
+      // Smoke trail
+      if (this.trails.length < MAX_TRAIL && Math.random() < 0.7) {
+        this.trails.push({ x, y: 0.65, z, vx: 0, vy: 0.3, vz: 0, life: 0.3, maxLife: 0.3, size: k, spin: 0, col: this.col('seeker', m.src.triggered) });
+      }
     }
     for (const s of w.shells) {
       const t = Math.min(1, s.t);
@@ -398,13 +526,35 @@ export class Renderer {
     }
     for (const b of w.soloBlades) P.blade.add(b.x, 0.7, b.z, Math.atan2(b.x - w.x, b.z - w.z) + Math.PI / 2, 1, 1, 1, this.colours.blades);
     for (const b of w.orbitBlades) P.blade.add(b.x, 0.6, b.z, b.angle, tv, tv, tv, this.colours['blades:t']);
+    for (const c of w.cones) {
+      const flicker = 0.28 + 0.06 * Math.sin(realTime * 40);
+      P.cone.add(c.x, 0.3, c.z, Math.atan2(-c.dirZ, c.dirX), c.range, 1, c.range, this.colours.cryo, flicker);
+    }
+    for (const f of w.freezes) P.ring.add(f.x, 0.15, f.z, 0, f.r, 1, f.r, this.colours['cryo:t'], f.life / 0.4);
+    for (const r of w.rails) {
+      const len = Math.hypot(r.x2 - r.x1, r.z2 - r.z1);
+      const k = r.life / r.maxLife;
+      P.rail.add(r.x1, 0.7, r.z1, Math.atan2(r.x2 - r.x1, r.z2 - r.z1) - Math.PI / 2, len, 1, r.width * (0.4 + 0.6 * k), this.colours[r.triggered ? 'rail:t' : 'rail'], 1.4 * k);
+    }
+    for (const m of w.mines) {
+      const blink = m.arm > 0 ? 0.4 : 0.6 + 0.6 * (Math.sin(realTime * 12 + m.x) > 0 ? 1 : 0);
+      const k = m.src.triggered ? tv : 1;
+      P.mine.add(m.x, 0, m.z, 0, k, 1, k, this.colours.ion, blink);
+    }
+    for (const g of w.singularities) {
+      const k = g.src.triggered ? tv : 1;
+      const pulse = 1 + 0.1 * Math.sin(realTime * 20);
+      P.singCore.add(g.x, 0.8, g.z, 0, k * pulse, k * pulse, k * pulse, WHITE);
+      P.singSwirl.add(g.x, 0.1, g.z, realTime * 6, g.pull, 1, g.pull, this.colours.singularity, 0.5 * k);
+      P.singSwirl.add(g.x, 0.12, g.z, -realTime * 4, g.pull * 0.6, 1, g.pull * 0.6, this.colours.singularity, 0.6 * k);
+    }
 
     // Hazards
     for (const h of w.hazards) {
       if (h.kind === 'puddle') P.puddle.add(h.x, 0.05, h.z, 0, h.r, 1, h.r, HAZARD, 0.5 * Math.min(1, h.life));
       else {
-        const s = h.kind === 'orb' ? 1.3 : 1;
-        P.glob.add(lerp(h.px, h.x), 0.6, lerp(h.pz, h.z), 0, s, s, s, h.kind === 'orb' ? ENEMY_COLOUR.overmind : HAZARD);
+        const s = h.kind === 'orb' ? 1.3 : h.kind === 'spit' ? 0.8 : 1;
+        P.glob.add(lerp(h.px, h.x), 0.6, lerp(h.pz, h.z), 0, s, s, s, h.kind === 'orb' ? this.glows.overmind : HAZARD);
       }
     }
 
@@ -417,18 +567,46 @@ export class Renderer {
       i++;
     }
     for (const p of w.pickups) {
-      const col = this.tmp.setHex(p.kind === 'repair' ? 0xf2f5ff : p.kind === 'magnet' ? 0x3ff2ff : 0xffd84a);
-      const s = p.kind === 'cache' ? 1.4 : 1;
-      P.pickup.add(p.x, 0.6 + Math.sin(realTime * 4) * 0.1, p.z, realTime * 2, s, s, s, col);
+      const y = 0.7 + Math.sin(realTime * 4) * 0.12;
+      if (p.kind === 'repair') P.repair.add(p.x, y, p.z, realTime * 2, 1, 1, 1, this.tmp2.setRGB(1.3, 1.3, 1.3));
+      else if (p.kind === 'magnet') P.magnet.add(p.x, y, p.z, realTime * 2, 1, 1, 1, this.tmp2.setRGB(0.4, 1.5, 1.6));
+      else P.cache.add(p.x, y, p.z, realTime * 2, 1, 1, 1, this.tmp2.setRGB(1.7, 1.35, 0.4));
     }
+
+    // Particles
+    this.updateParticles(this.shards, realDt, 12, P.shard);
+    this.updateParticles(this.trails, realDt, 0, P.trail);
 
     for (const k in P) P[k].end();
 
     this.collapse.visible = w.arenaRadius < Infinity;
-    if (this.collapse.visible) this.collapse.scale.set(w.arenaRadius, w.arenaRadius, 1);
+    if (this.collapse.visible) {
+      this.collapse.position.set(w.arenaCX, 0.05, w.arenaCZ);
+      this.collapse.scale.set(w.arenaRadius, w.arenaRadius, 1);
+    }
 
     this.updateArcs(w);
-    this.gl.render(this.scene, this.camera);
+    this.gl.info.reset();
+    if (this.quality === 'high') this.composer.render();
+    else this.gl.render(this.scene, this.camera);
+  }
+
+  private updateParticles(list: Particle[], dt: number, gravity: number, pool: Pool): void {
+    let k = 0;
+    for (let i = 0; i < list.length; i++) {
+      const p = list[i];
+      p.life -= dt;
+      if (p.life <= 0) continue;
+      p.vy -= gravity * dt;
+      p.x += p.vx * dt;
+      p.y = Math.max(0.05, p.y + p.vy * dt);
+      p.z += p.vz * dt;
+      p.spin += dt * 8;
+      const f = p.life / p.maxLife;
+      pool.add(p.x, p.y, p.z, p.spin, p.size * f, p.size * f, p.size * f, p.col, gravity ? 1 : f * 0.8);
+      list[k++] = p;
+    }
+    list.length = k;
   }
 
   private updateArcs(w: World): void {
@@ -446,9 +624,9 @@ export class Renderer {
       const width = 0.14 * k;
       const fade = (a.life / a.maxLife) * k;
       const c = this.tmp.setHex(TUNING.weaponInfo[a.weapon].colour);
-      const r = Math.min(1, c.r * 1.6 + 0.25) * fade;
-      const g = Math.min(1, c.g * 1.6 + 0.25) * fade;
-      const b = Math.min(1, c.b * 1.6 + 0.25) * fade;
+      const r = Math.min(1.5, c.r * 1.6 + 0.35) * fade;
+      const g = Math.min(1.5, c.g * 1.6 + 0.35) * fade;
+      const b = Math.min(1.5, c.b * 1.6 + 0.35) * fade;
       let px = a.x1;
       let pz = a.z1;
       for (let s = 1; s <= ARC_SUBDIV; s++) {

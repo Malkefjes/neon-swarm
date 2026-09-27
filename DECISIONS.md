@@ -110,6 +110,40 @@ None in milestone 1: every appendix value was as written. Values the appendix do
 
 Values the appendix doesn't give for milestone 2 are in `src/tuning.ts` next to their weapon, unit or boss, and summarised in entries 34–47 above.
 
+## Milestone 3
+
+### Rules the design leaves open (silent)
+
+| # | Decision | Reason |
+| --- | --- | --- |
+| 55 | Cryo Emitter aims at the nearest enemy (a boss first). The cone ticks every 0.25 s ÷ Rate on a 2 s on / 1 s off cycle; enemies inside are slowed, and freeze after 1.5 s inside without a break. Bosses are slowed but never frozen. The L5 shatter deals 10 in 1.5 u around the dead enemy without rolling for Links. Its trigger form freezes (no damage) and is an area pulse for the next part. | Simplest readings of the Cryo rows. |
+| 56 | Ion Mines drop within 1.5 u of the mech (only when an enemy is within 12 u), arm in 0.5 s, go off when an enemy's edge comes within 1.1 u, and last 20 s. At the cap the oldest solo mine is removed. L5 detonations set off mines within 3 u, armed or not. | Mines where the swarm chases you. |
+| 57 | The Railgun fires along the mech's last movement direction whenever an enemy is within 18 u; the rail is instant and hits every enemy along it once. | "In travel direction". |
+| 58 | The Singularity Core lands on the enemy with the most neighbours within 3 u among the 12 nearest (a boss if one is in range). It pulls at 3.5 u/s (bosses aren't pulled); damage ticks every 0.25 s and rolls for Links every 0.5 s; collapse radius 2 u before L5. The mini (trigger form) pulls within 2 u for 1.5 s and collapses for 50% of the frame's trigger-level collapse, in 2 u. | Numbers the table leaves open. |
+| 59 | Spitters walk in until 7 u from the mech, hold, and fire a glob every 2.5 s (5 u/s, 12 u range, 8 damage × time scaling). Their globs don't leave puddles (those are the Brood Mother's). | Appendix values; puddles are hers. |
+| 60 | COLOSSUS: the second trigger effect fires 0.1 s later from the same hit point, even if that enemy has died; each trigger takes two limiter tokens. SPARK: "an L5 weapon" for an Apex means a weapon at its Link level (L3). | See F4. |
+| 61 | Threat Levels: +15% speed applies to the Brood Mother too; Threat 5 gives Spitters a mix weight of 15 in windows that have none; Threat 8 makes 8 of each Brood Burst's 30 units Splitters, and the Overmind fires 5 beams in every phase; Threat 9 makes every 10th Surge unit a Carapace; Threat 10 caps starting max Hull at 60 (Hull cards still add). | Simplest readings. |
+| 62 | Endless: the Overmind's death counts as a win (unlocks, Threat progress) and the run goes on. Surges continue every 90 s from 16:30, cycling the formations and continuing the size formula (n = 10, 11, …); as in normal runs, the next Surge waits for the last to break. The run ends at Hull 0. | The design names Endless without rules. |
+| 63 | Winning at Threat N on either biome opens N + 1; winning on the Station at any Threat opens the Moon. | Feat table. |
+| 64 | Station: a fixed layout of 36 axis-aligned boxes (3–7 u) and cylinders (1.5–3 u radius), at least 5 u apart and 18 u clear around the start (the escape lanes). Obstacles block the mech and enemies, not shots. 8 airlock vents run 4 s in every 14, pulling enemies within 9 u at 3.5 u/s. | Learnable map; always a way out. |
+| 65 | Moon: 200 × 200 and wrapping; the world shifts in 20 u steps so the mech stays near the origin. 70 crystals (fixed layout) shatter when a bolt, missile or shell blast, Arc ring, rail, mine or collapse touches them, into 6 shards (12 damage × Power, 6 u) whose hits roll for the chain part that shattered the crystal; they regrow in 25 s. Shards don't shatter other crystals. | "Each shard counts as a hit for triggers"; no runaway chain. |
+| 66 | Pre-run screen: biome, Threat Level (up to the highest unlocked) and mode (15 minutes / Endless), remembered between visits. | Design screen list. |
+| 67 | Visual pass: enemy hues magenta on the Station and red on the Moon; lit bodies plus unlit glow parts that bloom; frozen enemies ice-white, slowed ones tinted; 4–6 shards per death fading in 0.5 s (24 for bosses); missile smoke trails; soft shadows under units; small shake on explosions of 2 u or more; bloom at half resolution. A cyan ring under the player keeps the frame findable in the crowd without touching the model. | Art direction. |
+| 68 | SPARK and COLOSSUS use the Neon Sentinel model at 0.9× and 1.25× scale. | No other frame models were supplied. |
+| 69 | A run starts only once the player model has loaded (the menus work meanwhile), so the stand-in frame never appears in play. | "No placeholder visuals remain". |
+| 70 | Automated checks run gameplay scenes with bloom off (`?dev&quality=low`) because the check machines render in software; performance and screenshots use the full look. | Keeps real-time checks inside their time limits. |
+
+### Design fixes (flag in summary)
+
+| # | Rule | Fix |
+| --- | --- | --- |
+| F4 | An Apex needs "a two-part chain at Chain Level 3+ plus an L5 weapon", but SPARK caps weapons at L4. | For SPARK, "L5" reads as its Link level (L3). |
+| F5 | The Overmind is "a stationary core at the arena centre", but the Moon wraps around and has no centre. | On the Moon it appears 20 u from the mech; its collapsing edge centres on it. |
+
+### Tuning changes
+
+None: the four new weapons, the Spitter, SPARK, COLOSSUS and the Threat Levels use the appendix values. Numbers the appendix doesn't give are in `src/tuning.ts` (weapons, `threat`, `endless`, `maps`) and summarised above.
+
 ## Directed by the owner
 
 | # | Change | Detail |

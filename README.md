@@ -22,7 +22,8 @@ Every push to `main` is tested, built and deployed to GitHub Pages (`.github/wor
 - `src/tuning.ts` — every tuning number. Change values here only (log changes in `DECISIONS.md`).
 - `src/sim/` — the deterministic, headless simulation (no DOM). `world.ts` is the game step; `weapons.ts` the six weapons and their trigger forms; `director.ts` spawning, elites and Surges; `bosses.ts` the Brood Mother and Overmind; `build.ts` the hardpoints and Link rules; `draft.ts` the level-up cards; `formulas.ts` the design's formulas; `bot.ts` the autopilot for simulated runs.
 - `src/meta.ts` — unlocks, the Codex and saved progress (localStorage).
-- `src/render/` — Three.js renderer (placeholder shapes until milestone 3), the DOM HUD and the menu screens.
+- `src/render/` — Three.js renderer, procedural models (`models.ts`), biome environments (`env.ts`), the DOM HUD and the menu screens.
+- `src/sim/maps.ts` — Station obstacles and vents, the wrap-around Moon and its crystals.
 - `src/assets/sentinel.glb` — the player model, as supplied (DECISIONS.md U1).
 - `src/dev.ts` — hidden dev tools.
 - `tests/` — Vitest suites. `tools/` — simulation runner and the milestone check script.
@@ -35,10 +36,12 @@ The `` ` `` key opens a panel to grant weapons, levels and Links, raise Chain Le
 URL parameters (with `?dev`): `seed=123`, `build=pulse:5,tesla:3`, `link=pulse>tesla:5` (head>tail:chainLevel),
 `stat=rate:2,power:1.5`, `god=1`, `stress=1` (every trigger roll succeeds), `t=80` (jump the clock), `surge=1`,
 `bench=800&minutes=15` (hold 800 enemies on screen with 15:00 HP, god mode, no drafts), `boss=brood|overmind`, `elite=1`,
-`bot=1` (autopilot), `speed=8` (run the sim 8× real time), `autostart=1`.
+`bot=1` (autopilot), `speed=8` (run the sim 8× real time), `autostart=1`, `frame=spark|colossus`, `biome=moon`,
+`threat=0-10`, `endless=1`, `weapons=all` (all 10 draftable), `mixed=1` (mixed-unit bench), `quality=low` (no bloom).
 
 `window.neon` (dev only): `world`, `profile`, `screen`, `restart()`, `stats()`, `cpuBench(seconds)`, `events`, `resetProfile()`.
 
-Milestone checks against a deployed build: `node tools/m1-check.mjs <url> <outDir>` and `node tools/m2-check.mjs <url> <outDir>`
+Milestone checks against a deployed build: `node tools/m1-check.mjs <url> <outDir>`, `m2-check.mjs` and `m3-check.mjs`
 (need Playwright + Chromium); `.github/workflows/live-check.yml` runs them after every deploy, together with
-`npm run sim -- --runs 20 --seconds 910 --god --check` (simulated runs against the design's level checkpoints).
+`npm run sim -- --runs 20 --seconds 910 --god --check` (simulated runs against the design's level checkpoints) and
+`npm run sim -- --runs 20 --seconds 910 --god --all-weapons --check-variety` (no Link in more than 20% of builds).

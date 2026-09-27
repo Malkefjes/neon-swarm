@@ -3,10 +3,11 @@ import { TUNING } from './tuning';
 import { World } from './sim/world';
 import { Renderer } from './render/renderer';
 import { Hud } from './render/hud';
-import { renderCodex, renderHangar, renderSummary } from './render/screens';
+import { FRAME_ORDER, changeSetup, renderCodex, renderHangar, renderPrerun, renderSummary, type Setup } from './render/screens';
 import { buildPanel, commandsFromUrl, cpuBench, makeFrameStats, pushFrame, readout, summarise } from './dev';
-import { botChoose, botMove } from './sim/bot';
-import { UNLOCKS, applyCodex, applyFeat, applyRunEnd, draftWeapons, emptyProfile, loadProfile, saveProfile, type UnlockId } from './meta';
+import { botChoose, botMove, botOrder } from './sim/bot';
+import { UNLOCKS, applyCodex, applyFeat, applyRunEnd, draftWeapons, emptyProfile, frameUnlocked, loadProfile, maxThreat, saveProfile, type UnlockId } from './meta';
+import type { BiomeId, FrameId } from './tuning';
 
 const DT = 1000 / TUNING.sim.tickRate; // ms per tick
 
@@ -20,11 +21,22 @@ let overflowCores: object[] = [];
 let benchRunning = false; // the CPU bench drives the world itself
 const $ = (id: string) => document.getElementById(id)!;
 
-type Screen = 'title' | 'hangar' | 'codex' | 'run' | 'paused' | 'over';
+type Screen = 'title' | 'hangar' | 'prerun' | 'codex' | 'run' | 'paused' | 'over';
 
 let profile = loadProfile();
+/** The chosen frame, biome, Threat Level and mode (remembered in the profile). */
+const setup: Setup = { ...profile.setup };
+let prerunRow = 0;
+function sanitiseSetup(): void {
+  if (!frameUnlocked(profile, setup.frame)) setup.frame = 'vanguard';
+  if (setup.biome === 'moon' && !profile.unlocks.includes('moon')) setup.biome = 'station';
+  setup.threat = Math.min(setup.threat, maxThreat(profile));
+  if (setup.endless && !profile.unlocks.includes('endless')) setup.endless = false;
+}
+sanitiseSetup();
 const canvas = $('view') as HTMLCanvasElement;
 const renderer = new Renderer(canvas);
+if (devMode && params.get('quality') === 'low') renderer.quality = 'low';
 const hud = new Hud((i, order) => world.choose(i, order));
 let world = makeWorld();
 let screen: Screen = 'title';
@@ -39,7 +51,23 @@ let runSaved = false;
 
 function makeWorld(): World {
   const seed = params.has('seed') ? Number(params.get('seed')) : (Date.now() ^ (Math.random() * 0x7fffffff)) >>> 0;
-  const w = new World({ seed, weapons: draftWeapons(profile) });
+  const devSetup = devMode
+    ? {
+        frame: (params.get('frame') as FrameId | null) ?? undefined,
+        biome: (params.get('biome') as BiomeId | null) ?? undefined,
+        threat: params.has('threat') ? Number(params.get('threat')) : undefined,
+        endless: params.has('endless') ? params.get('endless') === '1' : undefined,
+      }
+    : {};
+  const all = devMode && params.get('weapons') === 'all';
+  const w = new World({
+    seed,
+    weapons: all ? [...(['pulse', 'arc', 'tesla', 'seeker', 'blades', 'mortar', 'cryo', 'ion', 'rail', 'singularity'] as const)] : draftWeapons(profile),
+    frame: devSetup.frame ?? setup.frame,
+    biome: devSetup.biome ?? setup.biome,
+    threat: devSetup.threat ?? setup.threat,
+    endless: devSetup.endless ?? setup.endless,
+  });
   if (devMode) for (const c of commandsFromUrl(params)) w.dev(c);
   return w;
 }
@@ -55,14 +83,36 @@ function setScreen(s: Screen): void {
   $('title').hidden = s !== 'title';
   $('hangar').hidden = s !== 'hangar';
   $('codex').hidden = s !== 'codex';
+  $('prerun').hidden = s !== 'prerun';
   $('pause').hidden = s !== 'paused';
   $('over').hidden = s !== 'over';
   hud.show(s === 'run' || s === 'paused');
-  if (s === 'hangar') renderHangar(profile);
+  if (s === 'hangar') {
+    sanitiseSetup();
+    renderHangar(profile, setup.frame);
+  }
+  if (s === 'prerun') renderPrerun(profile, setup, prerunRow);
   if (s === 'codex') renderCodex(profile);
 }
 
+let modelLoaded = false;
+renderer.modelReady.then(() => {
+  modelLoaded = true;
+  if (pendingDeploy) {
+    pendingDeploy = false;
+    deploy();
+  }
+});
+let pendingDeploy = false;
+
 function deploy(): void {
+  // Runs start once the player model has arrived; the menus stay usable meanwhile
+  if (!modelLoaded) {
+    pendingDeploy = true;
+    hud.toast('LOADING FRAME…', 100000);
+    return;
+  }
+  hud.toast('', 1);
   world = makeWorld();
   acc = 0;
   hud.linkPending = -1;
@@ -76,7 +126,7 @@ function deploy(): void {
 function track(w: World): void {
   for (const ev of w.events) {
     if (ev.type === 'feat') {
-      const fresh = applyFeat(profile, ev.feat);
+      const fresh = applyFeat(profile, ev.feat, { biome: w.biome, threat: w.threat });
       runUnlocks.push(...fresh);
       for (const u of fresh) hud.toast(`UNLOCKED  ${UNLOCKS.find((x) => x.id === u)!.name.toUpperCase()}`, 200);
       saveProfile(profile);
@@ -141,8 +191,32 @@ window.addEventListener('keydown', (e) => {
       setScreen('hangar');
       return;
     case 'hangar':
-      if (e.code === 'Enter' || e.code === 'Space') deploy();
-      else if (e.code === 'KeyC') setScreen('codex');
+      if (e.code === 'Enter' || e.code === 'Space') {
+        prerunRow = 0;
+        setScreen('prerun');
+      } else if (e.code === 'KeyC') setScreen('codex');
+      else if (e.code === 'ArrowLeft' || e.code === 'ArrowRight' || e.code === 'KeyA' || e.code === 'KeyD') {
+        const dir = e.code === 'ArrowLeft' || e.code === 'KeyA' ? -1 : 1;
+        let i = FRAME_ORDER.indexOf(setup.frame);
+        for (let k = 0; k < FRAME_ORDER.length; k++) {
+          i = (i + dir + FRAME_ORDER.length) % FRAME_ORDER.length;
+          if (frameUnlocked(profile, FRAME_ORDER[i])) break;
+        }
+        setup.frame = FRAME_ORDER[i];
+        renderHangar(profile, setup.frame);
+      }
+      return;
+    case 'prerun':
+      if (e.code === 'Enter' || e.code === 'Space') {
+        profile.setup = { ...setup };
+        saveProfile(profile);
+        deploy();
+      } else if (e.code === 'Escape' || e.code === 'Backspace') setScreen('hangar');
+      else if (e.code === 'ArrowUp' || e.code === 'KeyW') prerunRow = (prerunRow + 2) % 3;
+      else if (e.code === 'ArrowDown' || e.code === 'KeyS') prerunRow = (prerunRow + 1) % 3;
+      else if (e.code === 'ArrowLeft' || e.code === 'KeyA') changeSetup(profile, setup, prerunRow, -1);
+      else if (e.code === 'ArrowRight' || e.code === 'KeyD') changeSetup(profile, setup, prerunRow, 1);
+      renderPrerun(profile, setup, prerunRow);
       return;
     case 'codex':
       if (e.code === 'Escape' || e.code === 'KeyC' || e.code === 'Backspace') setScreen('hangar');
@@ -195,7 +269,7 @@ function frame(now: number): void {
   }
   const t0 = performance.now();
 
-  if (autopilot && screen === 'run' && world.draft) world.choose(botChoose(world.draft), 0);
+  if (autopilot && screen === 'run' && world.draft) world.choose(botChoose(world.draft), botOrder(world));
   if (screen === 'run' && !world.draft) {
     acc += Math.min(frameMs, 250) * speed;
     let steps = 0;
@@ -232,6 +306,7 @@ function handleEvents(): void {
     }
   }
   track(world);
+  renderer.onEvents(world, world.events);
   renderer.shake = Math.max(renderer.shake, hud.effects(world.events));
   world.events.length = 0;
 }
@@ -248,6 +323,9 @@ if (devMode) {
     },
     get screen() {
       return screen;
+    },
+    get modelLoaded() {
+      return modelLoaded;
     },
     restart: deploy,
     events: eventLog,
@@ -269,4 +347,5 @@ if (devMode) {
 
 setScreen('title');
 if (devMode && params.get('autostart') === '1') deploy();
+// First-input timing for the checks: the title screen accepts a key as soon as it shows
 requestAnimationFrame(frame);

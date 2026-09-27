@@ -123,3 +123,12 @@ kbd { display: inline-block; border: 1px solid rgba(255, 255, 255, 0.35); border
 .summary-cols { display: grid; grid-template-columns: 1fr 1fr; gap: 20px; }
 .summary-cols h4 { margin: 6px 0; color: var(--dim); letter-spacing: 2px; font-size: 11px; }
 .new { color: #2dff8a; }
+
+.frame { cursor: pointer; }
+.prerun { display: flex; flex-direction: column; gap: 10px; margin: 14px 0; }
+.prerun .row { display: flex; gap: 12px; align-items: center; padding: 8px 10px; border: 1px solid transparent; flex-wrap: wrap; }
+.prerun .row.sel { border-color: var(--line); background: rgba(63, 242, 255, 0.06); }
+.prerun .lbl { width: 80px; color: var(--dim); letter-spacing: 2px; font-size: 11px; }
+.prerun .opt { padding: 3px 8px; border: 1px solid rgba(255, 255, 255, 0.15); color: var(--dim); }
+.prerun .opt.on { border-color: #fff; color: #fff; }
+.prerun .opt.locked { opacity: 0.45; }

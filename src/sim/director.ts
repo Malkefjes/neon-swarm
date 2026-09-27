@@ -389,7 +389,9 @@ function maintainBench(w: World): void {
     const r = w.rng.range(3, 14);
     const p = { x: w.x + Math.cos(a) * r, z: w.z + Math.sin(a) * r };
     w.clampToArena(p, 1);
-    w.spawnEnemy('mite', p.x, p.z, 0);
+    // Mixed benches cycle through every unit kind, to check silhouettes in a crowd
+    const kinds = ['mite', 'skitter', 'carapace', 'spitter', 'splitter'] as const;
+    w.spawnEnemy(w.benchMixed ? kinds[w.enemies.length % kinds.length] : 'mite', p.x, p.z, 0);
   }
 }
 

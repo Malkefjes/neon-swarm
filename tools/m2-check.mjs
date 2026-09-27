@@ -15,7 +15,7 @@ const browser = await chromium.launch({
 });
 const errors = [];
 async function newPage(context) {
-  const ctx = context ?? (await browser.newContext({ viewport: { width: 1280, height: 720 } }));
+  const ctx = context ?? (await browser.newContext({ viewport: { width: 960, height: 540 } }));
   const page = await ctx.newPage();
   page.on('console', (m) => m.type() === 'error' && errors.push(`console: ${m.text()}`));
   page.on('pageerror', (e) => errors.push(`pageerror: ${e.message}`));
@@ -32,7 +32,7 @@ const checks = {};
   for (const h of weapons) {
     for (const t of weapons) {
       if (h === t) continue;
-      await page.goto(`${base}?dev&autostart=1&god=1&stress=1&seed=3&link=${h}>${t}:5&bench=80&minutes=5`);
+      await page.goto(`${base}?dev&autostart=1&quality=low&god=1&stress=1&seed=3&link=${h}>${t}:5&bench=80&minutes=5`);
       await page.waitForFunction(() => window.neon && window.neon.world.tick > 10);
       // Sample for ~3 s of play: the tail must only ever fire in its trigger form
       let soloTail = 0;
@@ -72,7 +72,7 @@ const checks = {};
 // 2. A full 15-minute run plays start to finish (autopilot, god mode, sim at 8x)
 {
   const page = await newPage();
-  await page.goto(`${base}?dev&autostart=1&bot=1&god=1&seed=1&speed=8`);
+  await page.goto(`${base}?dev&autostart=1&quality=low&bot=1&god=1&seed=1&speed=8`);
   const t0 = Date.now();
   let shots = new Set();
   let st;
@@ -111,7 +111,7 @@ const checks = {};
   const context = await browser.newContext({ viewport: { width: 1280, height: 720 } });
   const page = await newPage(context);
   // Make a Link (unlocks Ion Mines) and log it in the Codex
-  await page.goto(`${base}?dev&autostart=1&god=1&stress=1&seed=5&link=pulse>tesla:1&bench=60&minutes=2`);
+  await page.goto(`${base}?dev&autostart=1&quality=low&god=1&stress=1&seed=5&link=pulse>tesla:1&bench=60&minutes=2`);
   await page.waitForFunction(() => window.neon && window.neon.profile.unlocks.includes('ion') && 'pulse>tesla' in window.neon.profile.codex, null, { timeout: 30000 });
   // Reload as a normal player (no dev tools) and open the Hangar
   await page.goto(base);

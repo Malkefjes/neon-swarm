@@ -14,8 +14,8 @@ const browser = await chromium.launch({
   args: ['--use-gl=angle', '--use-angle=swiftshader', '--enable-unsafe-swiftshader', '--ignore-gpu-blocklist'],
 });
 const errors = [];
-async function newPage() {
-  const context = await browser.newContext({ viewport: { width: 1280, height: 720 } });
+async function newPage(small = false) {
+  const context = await browser.newContext({ viewport: small ? { width: 960, height: 540 } : { width: 1280, height: 720 } });
   const page = await context.newPage();
   page.on('console', (m) => m.type() === 'error' && errors.push(`console: ${m.text()}`));
   page.on('pageerror', (e) => errors.push(`pageerror: ${e.message}`));
@@ -67,7 +67,7 @@ const results = {};
 
 // 3. A Link changes the fight: same seed and horde, unlinked vs both orders
 {
-  const page = await newPage();
+  const page = await newPage(true);
   const scenes = {
     unlinked: 'build=pulse:5,tesla:5',
     'pulse>tesla': 'link=pulse>tesla:1',
@@ -75,7 +75,7 @@ const results = {};
   };
   results.link = {};
   for (const [label, q] of Object.entries(scenes)) {
-    await page.goto(`${base}?dev&autostart=1&${q}&bench=300&minutes=5&seed=2`);
+    await page.goto(`${base}?dev&autostart=1&quality=low&${q}&bench=300&minutes=5&seed=2`);
     await page.waitForTimeout(2000);
     const k0 = await page.evaluate(() => window.neon.world.kills);
     await page.waitForTimeout(8000);
@@ -91,8 +91,8 @@ const results = {};
 
 // 4. Surge 1 at 1:30 in real time, and Overflow collects every core
 {
-  const page = await newPage();
-  await page.goto(`${base}?dev&autostart=1&bot=1&god=1&seed=3&build=pulse:4,tesla:4`);
+  const page = await newPage(true);
+  await page.goto(`${base}?dev&autostart=1&quality=low&bot=1&god=1&seed=3&build=pulse:4,tesla:4`);
   const t0 = Date.now();
   let overflowAt = null;
   let collected = null;

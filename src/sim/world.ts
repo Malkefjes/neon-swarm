@@ -101,7 +101,7 @@ export type DevCommand =
   | { cmd: 'spawn'; count: number; kind?: EnemyKind }
   | { cmd: 'god'; on: boolean }
   | { cmd: 'stress'; on: boolean }
-  | { cmd: 'bench'; count: number; minutes: number }
+  | { cmd: 'bench'; count: number; minutes: number; mixed?: boolean }
   | { cmd: 'time'; seconds: number }
   | { cmd: 'xp'; amount: number }
   | { cmd: 'director'; on: boolean };
@@ -259,6 +259,7 @@ export class World {
   benchCount = 0;
   directorOn = true;
   benchHpMult = 1;
+  benchMixed = false;
 
   // Logs
   inputs: number[] = [];
@@ -1341,6 +1342,7 @@ export class World {
         break;
       case 'bench':
         this.benchCount = c.count;
+        this.benchMixed = !!c.mixed;
         this.benchHpMult = hpMult(c.minutes) / hpMult(this.tMin);
         this.god = true;
         break;
