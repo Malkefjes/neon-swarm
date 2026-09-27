@@ -1,0 +1,28 @@
+name: Live milestone check
+
+# Runs the milestone checks against the deployed GitHub Pages site.
+on:
+  workflow_run:
+    workflows: [Deploy to GitHub Pages]
+    types: [completed]
+  workflow_dispatch:
+
+jobs:
+  check:
+    if: ${{ github.event_name == 'workflow_dispatch' || github.event.workflow_run.conclusion == 'success' }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+      - run: npm install --no-save playwright@1.56.1
+      - run: npx playwright install --with-deps chromium
+      - name: Milestone 1 checks on the live site
+        run: node tools/m1-check.mjs "https://${{ github.repository_owner }}.github.io/${{ github.event.repository.name }}/" m1-check
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: m1-check
+          path: m1-check

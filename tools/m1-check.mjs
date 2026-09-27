@@ -132,3 +132,19 @@ const results = {};
 results.consoleErrors = errors;
 console.log(JSON.stringify(results, null, 2));
 await browser.close();
+
+// Pass/fail per milestone 1 check
+const bench = results['bench pulse>tesla'];
+const ev = (type) => results.surge?.events?.find((e) => e.type === type);
+const checks = {
+  'load to first input < 10 s': results.loadToFirstInputMs < 10000,
+  '800 enemies + Pulse>Tesla cascade: CPU frame p95 <= 16.7 ms': bench.load.enemies >= 790 && bench.load.triggersFired > 0 && bench.cpuFrameMs.x1.frameP95 <= 16.7,
+  'a Link changes the fight': ['pulse>tesla', 'tesla>pulse'].every(
+    (k) => results.link[k].triggers > 0 && results.link[k].codex.includes(k) && results.link[k].killsIn8s !== results.link.unlinked.killsIn8s,
+  ),
+  'Surge 1 arrives at 1:30 (Breath at 1:20)': !!ev('surge') && Math.abs(ev('surge').t - 90) < 0.1 && !!ev('breath') && Math.abs(ev('breath').t - 80) < 0.1,
+  'Overflow collects every core': !!ev('overflow') && results.surge.coresAtBreak > 0 && results.surge.coresLeft4sLater === 0,
+  'no console errors': errors.length === 0,
+};
+for (const [name, ok] of Object.entries(checks)) console.log(`${ok ? 'PASS' : 'FAIL'}  ${name}`);
+process.exit(Object.values(checks).every(Boolean) ? 0 : 1);
